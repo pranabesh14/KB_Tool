@@ -36,8 +36,8 @@ kb_tool/
 
 ```bash
 # FFmpeg must be on your PATH
-sudo apt install ffmpeg          # Ubuntu/Debian
-brew install ffmpeg              # macOS
+sudo apt install moviepy          # Ubuntu/Debian
+brew install moviepy              # macOS
 ```
 
 ### 2. Python environment

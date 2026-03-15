@@ -1,6 +1,6 @@
 # 🧠 Knowledge Explorer — KB Tool
 
-A Streamlit RAG application that builds a searchable knowledge base from **PDF/TXT documents** and **YouTube / video URLs**, then answers questions using **Azure OpenAI (GPT-4o)**.
+A Streamlit RAG application that builds a searchable knowledge base from **PDF/TXT documents** and **YouTube(only downloaded ones) / video URLs**, then answers questions using **Azure OpenAI (GPT-4o)**.
 
 ---
 

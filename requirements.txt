@@ -1,10 +1,13 @@
 # ─── Web / UI ─────────────────────────────────────────────────────────────────
+
 streamlit>=1.35.0
 
 # ─── Environment ──────────────────────────────────────────────────────────────
+
 python-dotenv>=1.0.0
 
 # ─── Azure OpenAI / LangChain ─────────────────────────────────────────────────
+
 openai>=1.30.0
 langchain>=0.2.0
 langchain-openai>=0.1.8          # AzureChatOpenAI, AzureOpenAIEmbeddings
@@ -12,25 +15,35 @@ langchain-community>=0.2.0       # HuggingFaceEmbeddings, FAISS wrapper
 langchain-core>=0.2.0
 
 # ─── Vector store ─────────────────────────────────────────────────────────────
+
 faiss-cpu>=1.7.4                 # use faiss-gpu if you have a CUDA GPU
 
 # ─── Embeddings / Reranking ────────────────────────────────────────────────────
+
 sentence-transformers>=2.7.0     # CrossEncoder + SentenceTransformer
 huggingface-hub>=0.23.0
 
 # ─── Document parsing ─────────────────────────────────────────────────────────
+
 PyPDF2>=3.0.1
 
 # ─── Audio / Video transcription ─────────────────────────────────────────────
-openai-whisper>=20231117         # speech-to-text (installs as 'whisper')
-moviepy>=1.0.3                   # audio extraction — bundles its own ffmpeg
-                                 # via imageio-ffmpeg (no system install needed)
-imageio-ffmpeg>=0.4.9            # pinned explicitly to ensure bundled binary is present
+
+openai-whisper>=20231117         # local speech-to-text — runs on your machine,
+# no API key needed. Weights download once to
+# ~/.cache/whisper/ on first use (~74 MB for base)
+moviepy>=1.0.3                   # audio extraction from local video files
+# bundles its own ffmpeg via imageio-ffmpeg
+imageio-ffmpeg>=0.4.9            # pinned to ensure bundled ffmpeg binary is present
+yt-dlp>=2024.1.1                 # platform URL support (Dailymotion, Vimeo, etc.)
+# SSL errors auto-retried with –no-check-certificate
 
 # ─── Numerics / ML utilities ──────────────────────────────────────────────────
+
 numpy>=1.26.0
 scikit-learn>=1.4.0
 pandas>=2.1.4
 
 # ─── Azure Cognitive Services (optional – for Azure Speech fallback) ───────────
+
 # azure-cognitiveservices-speech>=1.35.0

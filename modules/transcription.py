@@ -32,6 +32,12 @@ seconds_to_hhmmss(seconds: float) -> str
 Utility: convert float seconds to HH:MM:SS / MM:SS string.
 “””
 
+import os
+import sys
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(**file**)))
+if _PROJECT_ROOT not in sys.path:
+sys.path.insert(0, _PROJECT_ROOT)
+
 import hashlib
 import json
 import os
@@ -115,41 +121,39 @@ return “transcript*” + hashlib.md5(source.encode()).hexdigest()[:12]
 def _json_cache_path(source: str) -> str:
 return os.path.join(DATA_DIR, _cache_key(source) + “.json”)
 
-# ─── Audio extraction: local files via moviepy ────────────────────────────────
+# ─── Shared audio → numpy converter (uses moviepy bundled ffmpeg) ─────────────
 
-def _extract_audio_from_file(source: str) -> np.ndarray:
+def _convert_to_numpy(file_path: str) -> np.ndarray:
 “””
-Extract audio from a local video/audio file.
-Returns float32 numpy array at 16 kHz mono (what Whisper expects).
+Convert any video/audio file to a float32 numpy array at 16kHz mono.
+Uses moviepy which bundles its own ffmpeg — no system install needed.
 
 ```
-Pure-audio formats (.wav .mp3 .flac .ogg) → whisper.load_audio() directly.
-Video containers + .aac / .m4a           → moviepy (bundled ffmpeg).
+Pure-audio formats (.wav .mp3 .flac .ogg) are passed directly to
+whisper.load_audio() which is faster and skips moviepy entirely.
 """
-ext = os.path.splitext(source)[1].lower()
+ext = os.path.splitext(file_path)[1].lower()
 
-# ── Path 1: Whisper reads directly ────────────────────────────────────────
+# Fast path — Whisper reads these natively
 if ext in _DIRECT_AUDIO_EXTENSIONS:
-    logger.info("Loading audio directly via Whisper: %s", os.path.basename(source))
-    return whisper.load_audio(source)
+    logger.info("Loading audio directly via Whisper: %s", os.path.basename(file_path))
+    return whisper.load_audio(file_path)
 
-# ── Path 2: moviepy extracts audio ────────────────────────────────────────
+# moviepy path — handles .webm, .m4a, .mp4, .mkv, .avi, .aac, etc.
 try:
     from moviepy.editor import VideoFileClip, AudioFileClip
 except ImportError as exc:
-    raise RuntimeError(
-        "moviepy is not installed. Run: pip install moviepy"
-    ) from exc
+    raise RuntimeError("moviepy is not installed. Run: pip install moviepy") from exc
 
-logger.info("Extracting audio via moviepy: %s", os.path.basename(source))
+logger.info("Extracting audio via moviepy (bundled ffmpeg): %s", os.path.basename(file_path))
 
-if ext in {".aac", ".m4a"}:
-    clip = AudioFileClip(source)
+if ext in {".aac", ".m4a", ".mp3"}:
+    clip = AudioFileClip(file_path)
 else:
-    video_clip = VideoFileClip(source, audio=True)
+    video_clip = VideoFileClip(file_path, audio=True)
     clip = video_clip.audio
     if clip is None:
-        raise RuntimeError(f"No audio track found in: {source}")
+        raise RuntimeError(f"No audio track found in: {file_path}")
 
 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
     tmp_path = tmp.name
@@ -169,29 +173,36 @@ finally:
         os.remove(tmp_path)
 ```
 
+# ─── Audio extraction: local files ────────────────────────────────────────────
+
+def _extract_audio_from_file(source: str) -> np.ndarray:
+“”“Extract audio from a local video/audio file.”””
+return _convert_to_numpy(source)
+
 # ─── Audio extraction: platform URLs via yt-dlp ───────────────────────────────
 
 def _ydl_download(url: str, output_template: str, verify_ssl: bool) -> Optional[str]:
 “””
-Run yt-dlp to download best audio stream to output_template.
-Returns the downloaded file path on success, None on SSL/network error
-(so the caller can retry with SSL disabled).
-Raises RuntimeError for non-SSL failures (unsupported URL, private video, etc.).
-“””
-import yt_dlp
+Run yt-dlp to download the best audio stream as-is.
 
 ```
+NO postprocessors are used — yt-dlp just saves the raw stream
+(typically .webm, .m4a, or .mp4).  moviepy (bundled ffmpeg) handles
+the conversion to WAV later, so no system ffmpeg binary is needed.
+
+Returns the downloaded file path on success, None on SSL/network error.
+Raises RuntimeError for non-SSL failures.
+"""
+import yt_dlp
+
 ydl_opts = {
     "format":             "bestaudio/best",
     "outtmpl":            output_template,
     "quiet":              True,
     "no_warnings":        True,
     "noplaylist":         True,
-    "nocheckcertificate": not verify_ssl,   # bypass SSL when verify_ssl=False
-    "postprocessors": [{
-        "key":            "FFmpegExtractAudio",
-        "preferredcodec": "wav",
-    }],
+    "nocheckcertificate": not verify_ssl,
+    # ── NO postprocessors — avoids requiring system ffmpeg binary ──────────
 }
 
 try:
@@ -199,41 +210,47 @@ try:
         ydl.download([url])
 except Exception as exc:
     err_lower = str(exc).lower()
-    # SSL-related errors → signal caller to retry without SSL check
     if any(kw in err_lower for kw in ("ssl", "certificate", "handshake", "tls")):
         logger.warning("SSL error during yt-dlp download: %s", exc)
         return None
-    # All other errors are hard failures
     raise RuntimeError(f"yt-dlp download failed: {exc}") from exc
 
-# Locate the downloaded file (extension may change after post-processing)
+# Locate the downloaded file
 parent = os.path.dirname(output_template)
-files  = [os.path.join(parent, f) for f in os.listdir(parent) if os.path.isfile(os.path.join(parent, f))]
+files  = [
+    os.path.join(parent, f)
+    for f in os.listdir(parent)
+    if os.path.isfile(os.path.join(parent, f))
+]
 return files[0] if files else None
 ```
 
 def _extract_audio_from_url(url: str) -> np.ndarray:
 “””
-Download audio from a platform URL (Dailymotion, Vimeo, etc.) using yt-dlp.
+Download audio from a platform URL (Dailymotion, YouTube, Vimeo, etc.)
+using yt-dlp, then extract audio via moviepy (no system ffmpeg needed).
 
 ```
+Flow:
+  1. yt-dlp downloads the raw audio stream (no postprocessing)
+     → file is typically .webm, .m4a, or .mp4
+  2. moviepy (bundled imageio-ffmpeg) converts it to 16kHz mono WAV
+  3. Whisper loads the WAV for transcription
+
 SSL retry strategy:
-  Attempt 1 — normal SSL verification (secure default).
-  Attempt 2 — SSL verification disabled (handles corporate proxies / SSL
-              inspection that present self-signed certificates).
+  Attempt 1 — normal SSL verification.
+  Attempt 2 — SSL verification disabled (corporate proxy / SSL inspection).
 """
 try:
     import yt_dlp  # noqa: F401
 except ImportError as exc:
-    raise RuntimeError(
-        "yt-dlp is not installed. Run: pip install yt-dlp"
-    ) from exc
+    raise RuntimeError("yt-dlp is not installed. Run: pip install yt-dlp") from exc
 
 with tempfile.TemporaryDirectory() as tmp_dir:
     output_template = os.path.join(tmp_dir, "audio.%(ext)s")
 
     # ── Attempt 1: normal SSL ──────────────────────────────────────────────
-    logger.info("Downloading audio from: %s", url)
+    logger.info("Downloading audio stream from: %s", url)
     audio_path = _ydl_download(url, output_template, verify_ssl=True)
 
     # ── Attempt 2: retry without SSL verification ──────────────────────────
@@ -254,9 +271,15 @@ with tempfile.TemporaryDirectory() as tmp_dir:
             "Tip: run  yt-dlp --list-formats <url>  to diagnose."
         )
 
-    logger.info("Audio downloaded: %s", os.path.basename(audio_path))
-    # load into memory BEFORE tmp_dir is cleaned up
-    return whisper.load_audio(audio_path)
+    logger.info(
+        "Downloaded: %s (%.1f MB) — converting via moviepy …",
+        os.path.basename(audio_path),
+        os.path.getsize(audio_path) / (1024 * 1024),
+    )
+
+    # ── Convert via moviepy (bundled ffmpeg — no system install needed) ────
+    # Must happen INSIDE the with-block before tmp_dir is deleted
+    return _convert_to_numpy(audio_path)
 ```
 
 # ─── Public API ───────────────────────────────────────────────────────────────

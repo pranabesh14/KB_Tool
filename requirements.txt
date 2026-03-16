@@ -13,6 +13,8 @@ langchain>=0.2.0
 langchain-openai>=0.1.8          # AzureChatOpenAI, AzureOpenAIEmbeddings
 langchain-community>=0.2.0       # HuggingFaceEmbeddings, FAISS wrapper
 langchain-core>=0.2.0
+langchain-classic>=0.0.1         # ConversationEntityMemory (moved out of langchain core in 0.2+)
+langchain-text-splitters>=0.2.0  # RecursiveCharacterTextSplitter (moved out of langchain core)
 
 # ─── Vector store ─────────────────────────────────────────────────────────────
 

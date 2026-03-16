@@ -13,7 +13,12 @@ All heavy logic lives in the modules/ package.
 import os
 
 import streamlit as st
-from langchain.memory import ConversationEntityMemory
+try:
+# LangChain >= 0.2 moved memory classes to langchain-classic
+from langchain_classic.memory import ConversationEntityMemory
+except ImportError:
+# Fallback for older langchain installations
+from langchain.memory import ConversationEntityMemory  # type: ignore
 
 # ── Internal modules ──────────────────────────────────────────────────────────
 

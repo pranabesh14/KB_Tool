@@ -11,6 +11,15 @@ All heavy logic lives in the modules/ package.
 “””
 
 import os
+import sys
+
+# ── Ensure the project root is on sys.path so ‘modules’ is always importable
+
+# regardless of the directory Streamlit is launched from.
+
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(**file**))
+if _PROJECT_ROOT not in sys.path:
+sys.path.insert(0, _PROJECT_ROOT)
 
 import streamlit as st
 try:
@@ -90,14 +99,23 @@ _init_session()
 
 @st.cache_resource
 def _startup_load():
+try:
 meta = load_meta()
 meta = scan_data_dir(meta)
 save_meta(meta)
 
 ```
-vs_pdf,   pdf_store  = load_index(INDEX_DIR_PDF,   embeddings)
-vs_video, vid_store  = load_index(INDEX_DIR_VIDEO, embeddings)
-return meta, vs_pdf, pdf_store, vs_video, vid_store
+    vs_pdf,   pdf_store  = load_index(INDEX_DIR_PDF,   embeddings)
+    vs_video, vid_store  = load_index(INDEX_DIR_VIDEO, embeddings)
+    logger.info(
+        "Startup load complete. PDF index: %s, Video index: %s",
+        "loaded" if vs_pdf   else "empty (upload files and click Process)",
+        "loaded" if vs_video else "empty (upload files and click Process)",
+    )
+    return meta, vs_pdf, pdf_store, vs_video, vid_store
+except Exception as exc:
+    logger.error("Startup load failed: %s", exc)
+    return {}, None, {}, None, {}
 ```
 
 _meta, _vs_pdf, _pdf_store, _vs_video, _vid_store = _startup_load()
@@ -202,6 +220,17 @@ Upload · Ask · Discover
 """, unsafe_allow_html=True)
 
 st.markdown(”—”)
+
+# ── First-run banner — shown when no files have been indexed yet ───────────────
+
+if st.session_state.vs_pdf is None and st.session_state.vs_video is None:
+st.info(
+“👋 **Welcome!** No knowledge base exists yet.\n\n”
+“1. Upload PDF / TXT files or video files below (or paste a video URL)\n”
+“2. Click **⚙️ Process** to build the index\n”
+“3. Then ask your questions in the chat”,
+icon=“ℹ️”,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 

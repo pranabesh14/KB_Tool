@@ -225,42 +225,54 @@ return _convert_to_numpy(source)
 
 def _ydl_download(url: str, output_template: str, verify_ssl: bool) -> Optional[str]:
 “””
-Run yt-dlp to download the best audio stream as-is.
+Download audio from a platform URL using yt-dlp.
 
 ```
-NO postprocessors are used — yt-dlp just saves the raw stream
-(typically .webm, .m4a, or .mp4).  moviepy (bundled ffmpeg) handles
-the conversion to WAV later, so no system ffmpeg binary is needed.
+Format priority (no system ffmpeg needed for any of these):
+  1. m4a  — raw AAC in MP4 container, moviepy handles natively
+  2. mp3  — most universally compatible
+  3. ogg  — open format, moviepy handles fine
+  4. wav  — uncompressed, Whisper reads directly
+  5. webm audio-only — fallback
+  No MPEG-TS or fragmented MP4 formats are selected to avoid
+  the "MPEG-TS in MP4 container" issue that requires system ffmpeg.
 
-Returns the downloaded file path on success, None on SSL/network error.
-Raises RuntimeError for non-SSL failures.
+Returns downloaded file path on success, None on SSL error.
+Raises RuntimeError for all other failures.
 """
 import yt_dlp
 
 ydl_opts = {
-    "format":             "bestaudio/best",
+    # Prefer clean audio-only formats that don't need remuxing.
+    # Exclude MPEG-TS (mp4 fragmented) and video-only formats.
+    # Format string: try m4a first, then mp3, then ogg/wav, then any audio
+    "format": (
+        "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=ogg]"
+        "/bestaudio[ext=wav]/bestaudio[protocol^=http][acodec!=none]"
+        "/bestaudio"
+    ),
     "outtmpl":            output_template,
     "quiet":              True,
     "no_warnings":        True,
     "noplaylist":         True,
     "nocheckcertificate": not verify_ssl,
-    # ── Suppress ALL side files (no metadata.json, thumbnails, subs etc.) ──
-    "writethumbnail":         False,
-    "writeinfojson":          False,
-    "writedescription":       False,
-    "writesubtitles":         False,
-    "writeautomaticsub":      False,
-    "write_all_thumbnails":   False,
-    "writeannotations":       False,
+    # ── Suppress ALL side files ────────────────────────────────────────────
+    "writethumbnail":              False,
+    "writeinfojson":               False,
+    "writedescription":            False,
+    "writesubtitles":              False,
+    "writeautomaticsub":           False,
+    "write_all_thumbnails":        False,
+    "writeannotations":            False,
     "no_write_playlist_metafiles": True,
-    "skip_download":          False,
-    # ── Disable network features that can fail on restricted networks ───────
-    "geo_bypass":             True,    # bypass geo-restriction where possible
-    "retries":                3,       # retry on transient network errors
-    "fragment_retries":       3,
-    "extractor_retries":      3,
-    "socket_timeout":         30,      # don't hang indefinitely
-    # ── NO postprocessors — avoids requiring system ffmpeg binary ───────────
+    "skip_download":               False,
+    # ── Network reliability ────────────────────────────────────────────────
+    "geo_bypass":       True,
+    "retries":          3,
+    "fragment_retries": 3,
+    "extractor_retries": 3,
+    "socket_timeout":   30,
+    # ── NO postprocessors — avoids requiring system ffmpeg binary ──────────
 }
 
 try:
@@ -280,7 +292,13 @@ files  = [
     for f in os.listdir(parent)
     if os.path.isfile(os.path.join(parent, f))
 ]
-return files[0] if files else None
+if not files:
+    logger.warning("yt-dlp ran but no file found in: %s", parent)
+    return None
+
+downloaded = os.path.normpath(files[0])
+logger.info("Downloaded: %s", os.path.basename(downloaded))
+return downloaded
 ```
 
 def _extract_audio_from_url(url: str) -> np.ndarray:

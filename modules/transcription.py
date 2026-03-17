@@ -126,39 +126,49 @@ return os.path.join(DATA_DIR, _cache_key(source) + “.json”)
 def _convert_to_numpy(file_path: str) -> np.ndarray:
 “””
 Convert any video/audio file to a float32 numpy array at 16kHz mono.
-Uses moviepy which bundles its own ffmpeg — no system install needed.
+Uses moviepy (bundled ffmpeg) — no system ffmpeg install needed.
 
 ```
-Pure-audio formats (.wav .mp3 .flac .ogg) are passed directly to
-whisper.load_audio() which is faster and skips moviepy entirely.
+Windows-safe: all file handles are fully closed before the temp WAV
+is read by Whisper and deleted, avoiding WinError32 file-lock errors.
+
+Pure-audio formats (.wav .mp3 .flac .ogg) skip moviepy entirely —
+Whisper loads them directly for speed.
 """
 ext = os.path.splitext(file_path)[1].lower()
 
-# Fast path — Whisper reads these natively
+# ── Fast path — Whisper reads these natively ───────────────────────────────
 if ext in _DIRECT_AUDIO_EXTENSIONS:
     logger.info("Loading audio directly via Whisper: %s", os.path.basename(file_path))
     return whisper.load_audio(file_path)
 
-# moviepy path — handles .webm, .m4a, .mp4, .mkv, .avi, .aac, etc.
+# ── moviepy path ───────────────────────────────────────────────────────────
 try:
     from moviepy.editor import VideoFileClip, AudioFileClip
 except ImportError as exc:
     raise RuntimeError("moviepy is not installed. Run: pip install moviepy") from exc
 
-logger.info("Extracting audio via moviepy (bundled ffmpeg): %s", os.path.basename(file_path))
+logger.info("Extracting audio via moviepy: %s", os.path.basename(file_path))
 
-if ext in {".aac", ".m4a", ".mp3"}:
-    clip = AudioFileClip(file_path)
-else:
-    video_clip = VideoFileClip(file_path, audio=True)
-    clip = video_clip.audio
-    if clip is None:
-        raise RuntimeError(f"No audio track found in: {file_path}")
+# Create temp file path WITHOUT opening it
+# (NamedTemporaryFile with delete=False still holds a handle on Windows)
+tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+os.close(tmp_fd)  # close the OS file descriptor immediately
 
-with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-    tmp_path = tmp.name
+video_clip = None
+clip       = None
 
 try:
+    # ── Open clip ─────────────────────────────────────────────────────────
+    if ext in {".aac", ".m4a", ".mp3"}:
+        clip = AudioFileClip(file_path)
+    else:
+        video_clip = VideoFileClip(file_path, audio=True)
+        clip = video_clip.audio
+        if clip is None:
+            raise RuntimeError(f"No audio track found in: {file_path}")
+
+    # ── Write WAV ─────────────────────────────────────────────────────────
     clip.write_audiofile(
         tmp_path,
         fps=16000,
@@ -166,11 +176,34 @@ try:
         ffmpeg_params=["-ac", "1"],     # mono
         logger=None,                    # suppress moviepy progress bar
     )
-    clip.close()
-    return whisper.load_audio(tmp_path)
+
 finally:
-    if os.path.exists(tmp_path):
+    # ── Close ALL handles before touching the file ─────────────────────────
+    # Order matters: audio clip first, then video clip
+    try:
+        if clip is not None:
+            clip.close()
+    except Exception:
+        pass
+    try:
+        if video_clip is not None:
+            video_clip.close()
+    except Exception:
+        pass
+
+# ── Read WAV into numpy AFTER all handles are closed ──────────────────────
+# On Windows this is critical — file must not be open anywhere
+try:
+    audio_np = whisper.load_audio(tmp_path)
+finally:
+    # ── Delete temp file ───────────────────────────────────────────────────
+    try:
         os.remove(tmp_path)
+    except OSError as exc:
+        # Log but don't raise — the numpy array is already loaded
+        logger.warning("Could not delete temp WAV %s: %s", tmp_path, exc)
+
+return audio_np
 ```
 
 # ─── Audio extraction: local files ────────────────────────────────────────────
@@ -366,7 +399,7 @@ logger.info(
     len(result.get("text", "").split()),
 )
 return json_path
-
+```
 
 def transcribe_video(source: str) -> str:
 “”“Alias for transcribe(). Kept for backward compatibility.”””

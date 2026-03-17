@@ -36,6 +36,7 @@ WHISPER_MODEL_SIZE = os.getenv(“WHISPER_MODEL_SIZE”, “base”)
 
 BASE_DIR        = os.path.dirname(os.path.dirname(os.path.abspath(**file**)))
 DATA_DIR        = os.path.join(BASE_DIR, “data”)
+TEMP_DIR        = os.path.join(BASE_DIR, “temp”)   # project-local temp for audio/video processing
 INDEX_DIR_PDF   = os.path.join(BASE_DIR, “faiss_pdf”)
 INDEX_DIR_VIDEO = os.path.join(BASE_DIR, “faiss_video”)
 QA_INDEX_DIR    = os.path.join(BASE_DIR, “qa_indexes”)
@@ -44,7 +45,7 @@ KB_QA_PATH      = os.path.join(QA_INDEX_DIR, “kb_QA_index”)
 META_FILE       = os.path.join(DATA_DIR, “index_meta.json”)
 LOG_FILE        = os.path.join(BASE_DIR, “kb_tool.log”)
 
-for _d in (DATA_DIR, INDEX_DIR_PDF, INDEX_DIR_VIDEO, QA_INDEX_DIR):
+for _d in (DATA_DIR, TEMP_DIR, INDEX_DIR_PDF, INDEX_DIR_VIDEO, QA_INDEX_DIR):
 os.makedirs(_d, exist_ok=True)
 
 # ─── Retrieval hyperparameters ────────────────────────────────────────────────
@@ -99,3 +100,4 @@ sh.setFormatter(logging.Formatter(_CONSOLE_FMT, datefmt=_DATE_FMT))
 logger.addHandler(sh)
 
 return logger
+```

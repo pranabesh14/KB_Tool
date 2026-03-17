@@ -13,6 +13,12 @@ load_index(index_dir, embeddings)                      -> (vs | None, doc_store)
 update_index_incremental(files, embeddings, index_dir) -> (vs, doc_store, added_sources)
 “””
 
+import os
+import sys
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(**file**)))
+if _PROJECT_ROOT not in sys.path:
+sys.path.insert(0, _PROJECT_ROOT)
+
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -90,17 +96,32 @@ def load_index(
 index_dir: str,
 embeddings,
 ) -> Tuple[Optional[FAISS], DocStore]:
-“”“Load an existing FAISS index + doc_store from disk. Returns (None, {}) if absent.”””
-if not os.path.exists(index_dir):
-return None, {}
+“””
+Load an existing FAISS index + doc_store from disk.
+Returns (None, {}) safely on first run when no index exists yet.
+“””
+# Both files must exist for a valid FAISS index
+index_faiss = os.path.join(index_dir, “index.faiss”)
+index_pkl   = os.path.join(index_dir, “index.pkl”)
+
+```
+if not os.path.isdir(index_dir):
+    logger.info("First run — index directory not created yet: %s", index_dir)
+    return None, {}
+
+if not os.path.isfile(index_faiss) or not os.path.isfile(index_pkl):
+    logger.info("First run — index files not built yet in: %s", index_dir)
+    return None, {}
+
 try:
-vs = FAISS.load_local(index_dir, embeddings, allow_dangerous_deserialization=True)
-doc_store = _load_doc_store(index_dir)
-logger.info(“Loaded index from %s.”, index_dir)
-return vs, doc_store
+    vs = FAISS.load_local(index_dir, embeddings, allow_dangerous_deserialization=True)
+    doc_store = _load_doc_store(index_dir)
+    logger.info("Loaded FAISS index from %s (%d sources).", index_dir, len(doc_store))
+    return vs, doc_store
 except Exception as exc:
-logger.warning(“Failed to load index at %s: %s”, index_dir, exc)
-return None, {}
+    logger.warning("Failed to load index at %s: %s", index_dir, exc)
+    return None, {}
+```
 
 def update_index_incremental(
 files: List[str],
@@ -149,4 +170,3 @@ _save_doc_store(doc_store, index_dir)
 logger.info("Incrementally added %d sources (%d chunks) to %s.",
             len(added_sources), len(new_docs), index_dir)
 return vs_existing, doc_store, added_sources
-```

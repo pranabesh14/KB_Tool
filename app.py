@@ -338,31 +338,43 @@ if raw_videos:
 
 # ── Update PDF index ───────────────────────────────────────────────────
 with st.spinner("Updating document index…"):
-    vs_pdf, pdf_store, added_pdf = update_index_incremental(
-        st.session_state.pdf_files, embeddings, INDEX_DIR_PDF
-    )
-    st.session_state.vs_pdf       = vs_pdf
-    st.session_state.vs_pdf_store = pdf_store
-    for f in st.session_state.pdf_files:
-        src = expected_source_for_file(f)
-        if src in added_pdf and f not in meta["indexed_pdfs"]:
-            meta["indexed_pdfs"].append(f)
-    save_meta(meta)
+    try:
+        vs_pdf, pdf_store, added_pdf = update_index_incremental(
+            st.session_state.pdf_files, embeddings, INDEX_DIR_PDF
+        )
+        st.session_state.vs_pdf       = vs_pdf
+        st.session_state.vs_pdf_store = pdf_store
+        for f in st.session_state.pdf_files:
+            src = expected_source_for_file(f)
+            if src in added_pdf and f not in meta["indexed_pdfs"]:
+                meta["indexed_pdfs"].append(f)
+        save_meta(meta)
+        if added_pdf:
+            st.success(f"✅ Indexed {len(added_pdf)} new document(s).")
+        else:
+            st.info("ℹ️ No new documents to index.")
+    except Exception as exc:
+        logger.error("PDF indexing failed: %s", exc, exc_info=True)
+        st.error(f"❌ Document indexing failed:\n{exc}")
 
 # ── Update Video index ─────────────────────────────────────────────────
 with st.spinner("Updating video index…"):
-    vs_vid, vid_store, added_vid = update_index_incremental(
-        st.session_state.video_jsons, embeddings, INDEX_DIR_VIDEO
-    )
-    st.session_state.vs_video       = vs_vid
-    st.session_state.vs_video_store = vid_store
-    for f in st.session_state.video_jsons:
-        src = expected_source_for_file(f)
-        if src in added_vid and f not in meta["indexed_videos"]:
-            meta["indexed_videos"].append(f)
-    save_meta(meta)
-
-st.success("✅ Knowledge base updated. You can ask questions now.")
+    try:
+        vs_vid, vid_store, added_vid = update_index_incremental(
+            st.session_state.video_jsons, embeddings, INDEX_DIR_VIDEO
+        )
+        st.session_state.vs_video       = vs_vid
+        st.session_state.vs_video_store = vid_store
+        for f in st.session_state.video_jsons:
+            src = expected_source_for_file(f)
+            if src in added_vid and f not in meta["indexed_videos"]:
+                meta["indexed_videos"].append(f)
+        save_meta(meta)
+        if added_vid:
+            st.success(f"✅ Indexed {len(added_vid)} new video transcript(s).")
+    except Exception as exc:
+        logger.error("Video indexing failed: %s", exc, exc_info=True)
+        st.error(f"❌ Video indexing failed:\n{exc}")
 ```
 
 # ─────────────────────────────────────────────────────────────────────────────

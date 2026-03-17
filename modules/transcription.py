@@ -223,57 +223,107 @@ return _convert_to_numpy(source)
 
 # ─── Audio extraction: platform URLs via yt-dlp ───────────────────────────────
 
+def _get_bundled_ffmpeg() -> Optional[str]:
+“””
+Return the path to the ffmpeg binary bundled with imageio-ffmpeg (installed
+via pip as a moviepy dependency). No system install or admin rights needed.
+Returns None if imageio-ffmpeg is not available.
+“””
+try:
+import imageio_ffmpeg
+path = imageio_ffmpeg.get_ffmpeg_exe()
+if os.path.isfile(path):
+logger.info(“Using bundled ffmpeg from imageio-ffmpeg: %s”, path)
+return path
+except Exception as exc:
+logger.warning(“Could not locate bundled ffmpeg: %s”, exc)
+return None
+
 def _ydl_download(url: str, output_template: str, verify_ssl: bool) -> Optional[str]:
 “””
-Download audio from a platform URL using yt-dlp.
+Download and extract audio from a platform URL using yt-dlp.
 
 ```
-Format priority (no system ffmpeg needed for any of these):
-  1. m4a  — raw AAC in MP4 container, moviepy handles natively
-  2. mp3  — most universally compatible
-  3. ogg  — open format, moviepy handles fine
-  4. wav  — uncompressed, Whisper reads directly
-  5. webm audio-only — fallback
-  No MPEG-TS or fragmented MP4 formats are selected to avoid
-  the "MPEG-TS in MP4 container" issue that requires system ffmpeg.
+Uses the ffmpeg binary bundled with imageio-ffmpeg (installed via pip
+as a moviepy dependency) — no system ffmpeg install or admin rights needed.
+
+With the bundled ffmpeg available, yt-dlp can:
+  • Handle MPEG-TS / fragmented MP4 containers (Dailymotion, YouTube etc.)
+  • Remux to clean m4a/mp3 via the FFmpegExtractAudio postprocessor
+  • Select the best available audio quality
 
 Returns downloaded file path on success, None on SSL error.
 Raises RuntimeError for all other failures.
 """
 import yt_dlp
 
-ydl_opts = {
-    # Prefer clean audio-only formats that don't need remuxing.
-    # Exclude MPEG-TS (mp4 fragmented) and video-only formats.
-    # Format string: try m4a first, then mp3, then ogg/wav, then any audio
-    "format": (
-        "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=ogg]"
-        "/bestaudio[ext=wav]/bestaudio[protocol^=http][acodec!=none]"
-        "/bestaudio"
-    ),
-    "outtmpl":            output_template,
-    "quiet":              True,
-    "no_warnings":        True,
-    "noplaylist":         True,
-    "nocheckcertificate": not verify_ssl,
-    # ── Suppress ALL side files ────────────────────────────────────────────
-    "writethumbnail":              False,
-    "writeinfojson":               False,
-    "writedescription":            False,
-    "writesubtitles":              False,
-    "writeautomaticsub":           False,
-    "write_all_thumbnails":        False,
-    "writeannotations":            False,
-    "no_write_playlist_metafiles": True,
-    "skip_download":               False,
-    # ── Network reliability ────────────────────────────────────────────────
-    "geo_bypass":       True,
-    "retries":          3,
-    "fragment_retries": 3,
-    "extractor_retries": 3,
-    "socket_timeout":   30,
-    # ── NO postprocessors — avoids requiring system ffmpeg binary ──────────
-}
+ffmpeg_path = _get_bundled_ffmpeg()
+
+if ffmpeg_path:
+    # ── Full quality mode — bundled ffmpeg available ───────────────────────
+    # Use FFmpegExtractAudio postprocessor to get clean m4a output
+    # yt-dlp will use our bundled ffmpeg, not the system one
+    ydl_opts = {
+        "format":             "bestaudio/best",
+        "outtmpl":            output_template,
+        "quiet":              True,
+        "no_warnings":        True,
+        "noplaylist":         True,
+        "nocheckcertificate": not verify_ssl,
+        "ffmpeg_location":    os.path.dirname(ffmpeg_path),  # dir containing ffmpeg binary
+        "postprocessors": [{
+            "key":            "FFmpegExtractAudio",
+            "preferredcodec": "m4a",
+            "preferredquality": "128",
+        }],
+        # ── Suppress side files ────────────────────────────────────────────
+        "writethumbnail":              False,
+        "writeinfojson":               False,
+        "writedescription":            False,
+        "writesubtitles":              False,
+        "writeautomaticsub":           False,
+        "write_all_thumbnails":        False,
+        "writeannotations":            False,
+        "no_write_playlist_metafiles": True,
+        # ── Network reliability ────────────────────────────────────────────
+        "geo_bypass":        True,
+        "retries":           3,
+        "fragment_retries":  3,
+        "extractor_retries": 3,
+        "socket_timeout":    30,
+    }
+else:
+    # ── Fallback mode — no ffmpeg at all ──────────────────────────────────
+    # Request only formats that don't need remuxing
+    logger.warning(
+        "imageio-ffmpeg not found. Falling back to no-remux format selection. "
+        "Some platforms (Dailymotion, YouTube) may not work. "
+        "Install imageio-ffmpeg: pip install imageio-ffmpeg"
+    )
+    ydl_opts = {
+        "format": (
+            "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=ogg]"
+            "/bestaudio[ext=wav]/bestaudio"
+        ),
+        "outtmpl":            output_template,
+        "quiet":              True,
+        "no_warnings":        True,
+        "noplaylist":         True,
+        "nocheckcertificate": not verify_ssl,
+        "writethumbnail":              False,
+        "writeinfojson":               False,
+        "writedescription":            False,
+        "writesubtitles":              False,
+        "writeautomaticsub":           False,
+        "write_all_thumbnails":        False,
+        "writeannotations":            False,
+        "no_write_playlist_metafiles": True,
+        "geo_bypass":        True,
+        "retries":           3,
+        "fragment_retries":  3,
+        "extractor_retries": 3,
+        "socket_timeout":    30,
+    }
 
 try:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -285,7 +335,7 @@ except Exception as exc:
         return None
     raise RuntimeError(f"yt-dlp download failed: {exc}") from exc
 
-# Locate the downloaded file
+# Locate the downloaded file (extension may differ after postprocessing)
 parent = os.path.dirname(output_template)
 files  = [
     os.path.join(parent, f)

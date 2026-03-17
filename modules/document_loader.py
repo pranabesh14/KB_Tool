@@ -18,6 +18,12 @@ metadata = {
 }
 “””
 
+import os
+import sys
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(**file**)))
+if _PROJECT_ROOT not in sys.path:
+sys.path.insert(0, _PROJECT_ROOT)
+
 import json
 import os
 from typing import List
@@ -125,31 +131,47 @@ if buf:
         )
 
 return docs
-
+```
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def load_and_split_document(path: str) -> List[Document]:
 “””
 Load a single file and return a list of chunked LangChain Documents.
-Returns an empty list on error.
+Logs the error and returns [] on failure so the caller can continue
+processing other files — but the error is visible in the log.
 “””
+if not os.path.isfile(path):
+logger.error(“File not found — skipping: %s”, path)
+return []
+
+```
 try:
-if path.endswith(”.json”):
-return _load_video_json(path)
-
-
-    source_name = os.path.basename(path)
-    if path.lower().endswith(".pdf"):
-        text = _load_pdf(path)
+    if path.endswith(".json"):
+        docs = _load_video_json(path)
     else:
-        text = _load_text(path)
-    return _chunk_text_doc(text, source_name)
+        source_name = os.path.basename(path)
+        if path.lower().endswith(".pdf"):
+            text = _load_pdf(path)
+        else:
+            text = _load_text(path)
+
+        if not text.strip():
+            logger.warning("File produced no text — is it empty or scanned? %s", path)
+            return []
+
+        docs = _chunk_text_doc(text, source_name)
+
+    if not docs:
+        logger.warning("No chunks produced for: %s", path)
+    else:
+        logger.info("Loaded %d chunks from: %s", len(docs), os.path.basename(path))
+    return docs
 
 except Exception as exc:
-    logger.error("Error reading %s: %s", path, exc)
+    logger.error("Failed to load %s: %s", os.path.basename(path), exc, exc_info=True)
     return []
-
+```
 
 def expected_source_for_file(path: str) -> str:
 “””

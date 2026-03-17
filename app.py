@@ -12,6 +12,12 @@ All heavy logic lives in the modules/ package.
 
 import os
 import sys
+import warnings
+
+# Suppress LangChain deprecation warnings (ConversationEntityMemory migration noise)
+
+warnings.filterwarnings(“ignore”, category=DeprecationWarning, module=“langchain”)
+warnings.filterwarnings(“ignore”, message=”.*migrating_memory.*”)
 
 # ── Ensure the project root is on sys.path so ‘modules’ is always importable
 

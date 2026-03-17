@@ -202,7 +202,23 @@ ydl_opts = {
     "no_warnings":        True,
     "noplaylist":         True,
     "nocheckcertificate": not verify_ssl,
-    # ── NO postprocessors — avoids requiring system ffmpeg binary ──────────
+    # ── Suppress ALL side files (no metadata.json, thumbnails, subs etc.) ──
+    "writethumbnail":         False,
+    "writeinfojson":          False,
+    "writedescription":       False,
+    "writesubtitles":         False,
+    "writeautomaticsub":      False,
+    "write_all_thumbnails":   False,
+    "writeannotations":       False,
+    "no_write_playlist_metafiles": True,
+    "skip_download":          False,
+    # ── Disable network features that can fail on restricted networks ───────
+    "geo_bypass":             True,    # bypass geo-restriction where possible
+    "retries":                3,       # retry on transient network errors
+    "fragment_retries":       3,
+    "extractor_retries":      3,
+    "socket_timeout":         30,      # don't hang indefinitely
+    # ── NO postprocessors — avoids requiring system ffmpeg binary ───────────
 }
 
 try:
@@ -350,7 +366,7 @@ logger.info(
     len(result.get("text", "").split()),
 )
 return json_path
-```
+
 
 def transcribe_video(source: str) -> str:
 “”“Alias for transcribe(). Kept for backward compatibility.”””

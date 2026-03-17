@@ -223,21 +223,121 @@ return _convert_to_numpy(source)
 
 # ─── Audio extraction: platform URLs via yt-dlp ───────────────────────────────
 
-def _get_bundled_ffmpeg() -> Optional[str]:
+def _get_ffmpeg_dir_for_ytdlp() -> Optional[str]:
 “””
-Return the path to the ffmpeg binary bundled with imageio-ffmpeg (installed
-via pip as a moviepy dependency). No system install or admin rights needed.
-Returns None if imageio-ffmpeg is not available.
+Locate the ffmpeg binary bundled with imageio-ffmpeg and make it available
+to yt-dlp without copying or renaming.
+
+```
+Strategy:
+  1. Get the binary path from imageio_ffmpeg
+  2. Create a symlink (or wrapper .bat on Windows) named ffmpeg.exe in TEMP_DIR
+  3. If that fails, add the binaries directory to PATH so yt-dlp can find it
+  4. Return TEMP_DIR as ffmpeg_location
+"""
+import shutil
+
+try:
+    import imageio_ffmpeg
+    src = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception as exc:
+    logger.warning("imageio-ffmpeg not available: %s", exc)
+    return None
+
+src = os.path.normpath(src)
+src_dir = os.path.dirname(src)
+logger.info("imageio-ffmpeg binary: %s", src)
+
+os.makedirs(TEMP_DIR, exist_ok=True)
+dst = os.path.normpath(os.path.join(TEMP_DIR, "ffmpeg.exe"))
+
+# Strategy 1: copy the binary
+if not os.path.isfile(dst):
+    try:
+        shutil.copy2(src, dst)
+        logger.info("Copied ffmpeg: %s -> %s", src, dst)
+    except Exception as copy_exc:
+        logger.warning("Copy failed (%s), trying .bat wrapper", copy_exc)
+
+        # Strategy 2: create a .bat wrapper that calls the real binary
+        bat_path = os.path.normpath(os.path.join(TEMP_DIR, "ffmpeg.bat"))
+        try:
+            with open(bat_path, "w") as f:
+                bat_txt = "@echo off\r\n" + chr(34) + src + chr(34) + " %*\r\n"
+                f.write(bat_txt)
+
+            logger.info("Created ffmpeg.bat wrapper: %s", bat_path)
+        except Exception as bat_exc:
+            logger.warning("bat wrapper failed (%s), adding to PATH", bat_exc)
+
+        # Strategy 3: add the imageio binaries dir to PATH
+        # yt-dlp also searches PATH for ffmpeg
+        current_path = os.environ.get("PATH", "")
+        if src_dir not in current_path:
+            os.environ["PATH"] = src_dir + os.pathsep + current_path
+            logger.info("Added imageio-ffmpeg dir to PATH: %s", src_dir)
+
+        # Also set ffmpeg_location to src_dir so yt-dlp searches there
+        # even though the filename is wrong - some yt-dlp versions search by glob
+        return src_dir
+
+return TEMP_DIR
+```
+
+def _log_available_formats(url: str, verify_ssl: bool, ffmpeg_dir: Optional[str]) -> None:
+“””
+Fetch and log/print all available formats for a URL.
+Uses extract_info with download=False - no actual download occurs.
+Prints to console AND writes to log so it’s visible even if log file has issues.
 “””
 try:
-import imageio_ffmpeg
-path = imageio_ffmpeg.get_ffmpeg_exe()
-if os.path.isfile(path):
-logger.info(“Using bundled ffmpeg from imageio-ffmpeg: %s”, path)
-return path
+import yt_dlp
+opts = {
+“quiet”:              False,   # allow output so we see errors
+“no_warnings”:        False,
+“noplaylist”:         True,
+“nocheckcertificate”: not verify_ssl,
+}
+if ffmpeg_dir:
+opts[“ffmpeg_location”] = ffmpeg_dir
+
+```
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if not info:
+        print("[KB Tool] Could not extract video info - info was empty")
+        logger.warning("Could not extract video info for %s - info was empty", url)
+        return
+
+    formats = info.get("formats", [])
+    if not formats:
+        print("[KB Tool] No formats found in video info")
+        logger.warning("No formats found for %s", url)
+        return
+
+    lines = ["", f"Available formats for: {url}", "-" * 60]
+    for f in formats:
+        lines.append(
+            f"  format_id={f.get('format_id','?'):<12} "
+            f"ext={f.get('ext','?'):<6} "
+            f"acodec={f.get('acodec','?'):<12} "
+            f"vcodec={f.get('vcodec','?'):<12} "
+            f"protocol={f.get('protocol','?')}"
+        )
+    lines.append("-" * 60)
+    output = "\n".join(lines)
+
+    # Print to console so it's visible in terminal
+    print(output)
+    # Write to log
+    logger.warning(output)
+
 except Exception as exc:
-logger.warning(“Could not locate bundled ffmpeg: %s”, exc)
-return None
+    msg = f"[KB Tool] Could not list formats for {url}: {exc}"
+    print(msg)
+    logger.warning(msg)
+```
 
 def _ydl_download(url: str, output_template: str, verify_ssl: bool) -> Optional[str]:
 “””
@@ -257,26 +357,45 @@ Raises RuntimeError for all other failures.
 """
 import yt_dlp
 
-ffmpeg_path = _get_bundled_ffmpeg()
+ffmpeg_dir = _get_ffmpeg_dir_for_ytdlp()
 
-if ffmpeg_path:
-    # ── Full quality mode - bundled ffmpeg available ───────────────────────
-    # Use FFmpegExtractAudio postprocessor to get clean m4a output
-    # yt-dlp will use our bundled ffmpeg, not the system one
+if ffmpeg_dir:
+    # Full quality mode - bundled ffmpeg available
+    # Use a permissive format chain so any available stream is accepted
+    # then FFmpegExtractAudio extracts the audio track
     ydl_opts = {
-        "format":             "bestaudio/best",
+        # Try audio-only first, fall back to any format with audio
+        # 'bestaudio' alone without [ext=...] constraints is most permissive
+        # Format selection strategy - handles multiple platforms:
+        #
+        # 1. bestaudio[ext=m4a]          - YouTube, Vimeo: clean audio-only m4a (10-50MB)
+        # 2. bestaudio[ext=mp3]           - platforms serving mp3 audio streams
+        # 3. bestaudio[ext=webm]          - YouTube webm audio-only (opus codec)
+        # 4. best[protocol=m3u8]          - Dailymotion: HLS combined stream
+        # 5. best[protocol=m3u8_native]   - HLS native fallback
+        # 6. bestaudio                    - any audio-only stream on any platform
+        # 7. best                         - last resort: any available format
+        "format": (
+            "bestaudio[ext=m4a]"
+            "/bestaudio[ext=mp3]"
+            "/bestaudio[ext=webm]"
+            "/best[protocol=m3u8]"
+            "/best[protocol=m3u8_native]"
+            "/bestaudio"
+            "/best"
+        ),
         "outtmpl":            output_template,
         "quiet":              True,
         "no_warnings":        True,
         "noplaylist":         True,
         "nocheckcertificate": not verify_ssl,
-        "ffmpeg_location":    os.path.dirname(ffmpeg_path),  # dir containing ffmpeg binary
+        "ffmpeg_location":    ffmpeg_dir,
         "postprocessors": [{
-            "key":            "FFmpegExtractAudio",
-            "preferredcodec": "m4a",
-            "preferredquality": "128",
+            "key":              "FFmpegExtractAudio",
+            "preferredcodec":   "wav",
+            "preferredquality": "0",
         }],
-        # ── Suppress side files ────────────────────────────────────────────
+        # Suppress side files
         "writethumbnail":              False,
         "writeinfojson":               False,
         "writedescription":            False,
@@ -285,7 +404,7 @@ if ffmpeg_path:
         "write_all_thumbnails":        False,
         "writeannotations":            False,
         "no_write_playlist_metafiles": True,
-        # ── Network reliability ────────────────────────────────────────────
+        # Network reliability
         "geo_bypass":        True,
         "retries":           3,
         "fragment_retries":  3,
@@ -333,6 +452,9 @@ except Exception as exc:
     if any(kw in err_lower for kw in ("ssl", "certificate", "handshake", "tls")):
         logger.warning("SSL error during yt-dlp download: %s", exc)
         return None
+    if "requested format is not available" in err_lower:
+        # Log available formats with SSL disabled since first attempt already hit SSL error
+        _log_available_formats(url, verify_ssl=False, ffmpeg_dir=ffmpeg_dir)
     raise RuntimeError(f"yt-dlp download failed: {exc}") from exc
 
 # Locate the downloaded file (extension may differ after postprocessing)
@@ -486,6 +608,7 @@ logger.info(
     len(result.get("text", "").split()),
 )
 return json_path
+```
 
 def transcribe_video(source: str) -> str:
 “”“Alias for transcribe(). Kept for backward compatibility.”””

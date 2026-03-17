@@ -41,13 +41,13 @@ sys.path.insert(0, _PROJECT_ROOT)
 import hashlib
 import json
 import os
-import tempfile
+import uuid
 from typing import List, Optional
 
 import numpy as np
 import whisper
 
-from modules.config import DATA_DIR, WHISPER_MODEL_SIZE, get_logger
+from modules.config import DATA_DIR, TEMP_DIR, WHISPER_MODEL_SIZE, get_logger
 
 logger = get_logger(“transcription”)
 
@@ -129,15 +129,17 @@ Convert any video/audio file to a float32 numpy array at 16kHz mono.
 Uses moviepy (bundled ffmpeg) — no system ffmpeg install needed.
 
 ```
-Windows-safe: all file handles are fully closed before the temp WAV
-is read by Whisper and deleted, avoiding WinError32 file-lock errors.
+Temp files are written to the project TEMP_DIR (not the system temp
+directory) using a unique UUID filename to avoid collisions and
+Windows path/permission issues.
 
-Pure-audio formats (.wav .mp3 .flac .ogg) skip moviepy entirely —
-Whisper loads them directly for speed.
+All moviepy handles are fully closed before reading or deleting the
+temp WAV — prevents WinError 32 (file in use) and WinError 2 (file
+not found due to mixed slashes or premature cleanup).
 """
 ext = os.path.splitext(file_path)[1].lower()
 
-# ── Fast path — Whisper reads these natively ───────────────────────────────
+# ── Fast path — Whisper reads these natively, no moviepy needed ───────────
 if ext in _DIRECT_AUDIO_EXTENSIONS:
     logger.info("Loading audio directly via Whisper: %s", os.path.basename(file_path))
     return whisper.load_audio(file_path)
@@ -150,10 +152,11 @@ except ImportError as exc:
 
 logger.info("Extracting audio via moviepy: %s", os.path.basename(file_path))
 
-# Create temp file path WITHOUT opening it
-# (NamedTemporaryFile with delete=False still holds a handle on Windows)
-tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
-os.close(tmp_fd)  # close the OS file descriptor immediately
+# Use project TEMP_DIR with a UUID name — avoids system temp permission
+# issues and mixed-slash path problems on Windows
+tmp_path = os.path.join(TEMP_DIR, f"audio_{uuid.uuid4().hex}.wav")
+# Normalise to OS path separators (critical on Windows)
+tmp_path = os.path.normpath(tmp_path)
 
 video_clip = None
 clip       = None
@@ -168,7 +171,7 @@ try:
         if clip is None:
             raise RuntimeError(f"No audio track found in: {file_path}")
 
-    # ── Write WAV ─────────────────────────────────────────────────────────
+    # ── Write WAV to project temp dir ─────────────────────────────────────
     clip.write_audiofile(
         tmp_path,
         fps=16000,
@@ -178,8 +181,8 @@ try:
     )
 
 finally:
-    # ── Close ALL handles before touching the file ─────────────────────────
-    # Order matters: audio clip first, then video clip
+    # ── Close ALL handles before reading/deleting ─────────────────────────
+    # Clip first, then the parent video clip
     try:
         if clip is not None:
             clip.close()
@@ -191,16 +194,22 @@ finally:
     except Exception:
         pass
 
-# ── Read WAV into numpy AFTER all handles are closed ──────────────────────
-# On Windows this is critical — file must not be open anywhere
+# ── Read WAV into numpy AFTER all handles are confirmed closed ─────────────
+if not os.path.isfile(tmp_path):
+    raise RuntimeError(
+        f"Temp WAV was not created at {tmp_path}. "
+        "moviepy/ffmpeg may have failed silently — check kb_tool.log."
+    )
+
 try:
+    logger.debug("Loading temp WAV into numpy: %s", tmp_path)
     audio_np = whisper.load_audio(tmp_path)
 finally:
-    # ── Delete temp file ───────────────────────────────────────────────────
+    # ── Delete temp WAV — log warning if it fails but don't raise ─────────
     try:
         os.remove(tmp_path)
+        logger.debug("Deleted temp WAV: %s", tmp_path)
     except OSError as exc:
-        # Log but don't raise — the numpy array is already loaded
         logger.warning("Could not delete temp WAV %s: %s", tmp_path, exc)
 
 return audio_np
@@ -280,11 +289,8 @@ Download audio from a platform URL (Dailymotion, YouTube, Vimeo, etc.)
 using yt-dlp, then extract audio via moviepy (no system ffmpeg needed).
 
 ```
-Flow:
-  1. yt-dlp downloads the raw audio stream (no postprocessing)
-     → file is typically .webm, .m4a, or .mp4
-  2. moviepy (bundled imageio-ffmpeg) converts it to 16kHz mono WAV
-  3. Whisper loads the WAV for transcription
+Downloads to project TEMP_DIR (not system temp) for predictable paths
+and to avoid Windows permission issues with system temp directories.
 
 SSL retry strategy:
   Attempt 1 — normal SSL verification.
@@ -295,9 +301,14 @@ try:
 except ImportError as exc:
     raise RuntimeError("yt-dlp is not installed. Run: pip install yt-dlp") from exc
 
-with tempfile.TemporaryDirectory() as tmp_dir:
-    output_template = os.path.join(tmp_dir, "audio.%(ext)s")
+import shutil
 
+# Use a unique subfolder inside project TEMP_DIR for this download
+download_dir    = os.path.normpath(os.path.join(TEMP_DIR, f"dl_{uuid.uuid4().hex}"))
+os.makedirs(download_dir, exist_ok=True)
+output_template = os.path.join(download_dir, "audio.%(ext)s")
+
+try:
     # ── Attempt 1: normal SSL ──────────────────────────────────────────────
     logger.info("Downloading audio stream from: %s", url)
     audio_path = _ydl_download(url, output_template, verify_ssl=True)
@@ -310,7 +321,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
         )
         audio_path = _ydl_download(url, output_template, verify_ssl=False)
 
-    if not audio_path or not os.path.exists(audio_path):
+    if not audio_path or not os.path.isfile(audio_path):
         raise RuntimeError(
             f"yt-dlp could not download audio from: {url}\n"
             "Possible causes:\n"
@@ -320,15 +331,23 @@ with tempfile.TemporaryDirectory() as tmp_dir:
             "Tip: run  yt-dlp --list-formats <url>  to diagnose."
         )
 
+    audio_path = os.path.normpath(audio_path)
     logger.info(
         "Downloaded: %s (%.1f MB) — converting via moviepy …",
         os.path.basename(audio_path),
         os.path.getsize(audio_path) / (1024 * 1024),
     )
 
-    # ── Convert via moviepy (bundled ffmpeg — no system install needed) ────
-    # Must happen INSIDE the with-block before tmp_dir is deleted
+    # ── Convert via moviepy (bundled ffmpeg) ───────────────────────────────
     return _convert_to_numpy(audio_path)
+
+finally:
+    # ── Clean up the download subfolder entirely ───────────────────────────
+    try:
+        shutil.rmtree(download_dir, ignore_errors=True)
+        logger.debug("Cleaned up download dir: %s", download_dir)
+    except Exception as exc:
+        logger.warning("Could not clean up download dir %s: %s", download_dir, exc)
 ```
 
 # ─── Public API ───────────────────────────────────────────────────────────────

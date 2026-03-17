@@ -131,12 +131,13 @@ index_dir: str,
 “””
 Append only NEW files (by source key) to an existing index.
 Returns (vs, doc_store, list_of_newly_added_sources).
+Raises RuntimeError if embeddings fail so the caller can show the user.
 “””
 vs_existing, doc_store = load_index(index_dir, embeddings)
 existing_sources = set(doc_store.keys())
 
 ```
-# filter to genuinely new files
+# Filter to genuinely new files
 new_files = [
     f for f in files
     if expected_source_for_file(f) not in existing_sources
@@ -147,17 +148,35 @@ if not new_files:
     logger.info("No new files to index at %s.", index_dir)
     return vs_existing, doc_store, []
 
+# Load and chunk documents
 new_docs: List[Document] = []
+failed_files: List[str] = []
 for path in new_files:
     file_docs = load_and_split_document(path)
-    new_docs.extend(file_docs)
-    _populate_doc_store(file_docs, doc_store, os.path.basename(path))
+    if file_docs:
+        new_docs.extend(file_docs)
+        _populate_doc_store(file_docs, doc_store, os.path.basename(path))
+    else:
+        failed_files.append(os.path.basename(path))
+
+if failed_files:
+    logger.warning("These files produced no chunks: %s", ", ".join(failed_files))
 
 if not new_docs:
-    logger.warning("New files produced no documents for %s.", index_dir)
+    logger.warning("No documents to index — all files failed to load for %s.", index_dir)
     return vs_existing, doc_store, []
 
-vs_new = FAISS.from_documents(new_docs, embeddings)
+# Build FAISS index — let this raise so the caller sees embedding errors
+logger.info("Building FAISS index for %d chunks in %s …", len(new_docs), index_dir)
+try:
+    vs_new = FAISS.from_documents(new_docs, embeddings)
+except Exception as exc:
+    logger.error("FAISS index creation failed: %s", exc, exc_info=True)
+    raise RuntimeError(
+        f"Failed to build FAISS index at {index_dir}.\n"
+        f"Most likely cause: embeddings are not working correctly.\n"
+        f"Error: {exc}"
+    ) from exc
 
 if vs_existing is None:
     vs_existing = vs_new
@@ -167,6 +186,9 @@ else:
 os.makedirs(index_dir, exist_ok=True)
 vs_existing.save_local(index_dir)
 _save_doc_store(doc_store, index_dir)
-logger.info("Incrementally added %d sources (%d chunks) to %s.",
-            len(added_sources), len(new_docs), index_dir)
+logger.info(
+    "Index updated at %s — added %d source(s), %d chunks.",
+    index_dir, len(added_sources), len(new_docs)
+)
 return vs_existing, doc_store, added_sources
+```

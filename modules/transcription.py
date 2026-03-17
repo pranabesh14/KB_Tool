@@ -1,5 +1,5 @@
 “””
-transcription.py — Video/audio transcription pipeline.
+transcription.py - Video/audio transcription pipeline.
 
 ## Two input modes
 
@@ -14,7 +14,7 @@ transcription.py — Video/audio transcription pipeline.
 
 Whisper runs 100% locally on your machine (openai-whisper package).
 Model weights download once to ~/.cache/whisper/ on first use (~74 MB for base).
-No OpenAI API key needed — “openai-whisper” is the open-source local model.
+No OpenAI API key needed - “openai-whisper” is the open-source local model.
 
 ## Public API
 
@@ -85,7 +85,7 @@ Load and cache the Whisper model (lazy singleton).
 ```
 - Model size is set by WHISPER_MODEL_SIZE in .env (default: base).
 - Weights download once to ~/.cache/whisper/ on first use.
-- Subsequent calls reuse cached weights — no internet needed after first run.
+- Subsequent calls reuse cached weights - no internet needed after first run.
 - Falls back to smaller sizes if the requested one fails to load.
 """
 global _WHISPER_MODEL
@@ -94,7 +94,7 @@ if _WHISPER_MODEL is not None:
 
 for size in _build_fallback_order(WHISPER_MODEL_SIZE):
     try:
-        logger.info("Loading Whisper '%s' model (local, no API call) …", size)
+        logger.info("Loading Whisper '%s' model (local, no API call) ...", size)
         _WHISPER_MODEL = whisper.load_model(size)
         logger.info("Whisper '%s' ready.", size)
         return _WHISPER_MODEL
@@ -126,7 +126,7 @@ return os.path.join(DATA_DIR, _cache_key(source) + “.json”)
 def _convert_to_numpy(file_path: str) -> np.ndarray:
 “””
 Convert any video/audio file to a float32 numpy array at 16kHz mono.
-Uses moviepy (bundled ffmpeg) — no system ffmpeg install needed.
+Uses moviepy (bundled ffmpeg) - no system ffmpeg install needed.
 
 ```
 Temp files are written to the project TEMP_DIR (not the system temp
@@ -134,12 +134,12 @@ directory) using a unique UUID filename to avoid collisions and
 Windows path/permission issues.
 
 All moviepy handles are fully closed before reading or deleting the
-temp WAV — prevents WinError 32 (file in use) and WinError 2 (file
+temp WAV - prevents WinError 32 (file in use) and WinError 2 (file
 not found due to mixed slashes or premature cleanup).
 """
 ext = os.path.splitext(file_path)[1].lower()
 
-# ── Fast path — Whisper reads these natively, no moviepy needed ───────────
+# ── Fast path - Whisper reads these natively, no moviepy needed ───────────
 if ext in _DIRECT_AUDIO_EXTENSIONS:
     logger.info("Loading audio directly via Whisper: %s", os.path.basename(file_path))
     return whisper.load_audio(file_path)
@@ -152,7 +152,7 @@ except ImportError as exc:
 
 logger.info("Extracting audio via moviepy: %s", os.path.basename(file_path))
 
-# Use project TEMP_DIR with a UUID name — avoids system temp permission
+# Use project TEMP_DIR with a UUID name - avoids system temp permission
 # issues and mixed-slash path problems on Windows
 tmp_path = os.path.join(TEMP_DIR, f"audio_{uuid.uuid4().hex}.wav")
 # Normalise to OS path separators (critical on Windows)
@@ -198,14 +198,14 @@ finally:
 if not os.path.isfile(tmp_path):
     raise RuntimeError(
         f"Temp WAV was not created at {tmp_path}. "
-        "moviepy/ffmpeg may have failed silently — check kb_tool.log."
+        "moviepy/ffmpeg may have failed silently - check kb_tool.log."
     )
 
 try:
     logger.debug("Loading temp WAV into numpy: %s", tmp_path)
     audio_np = whisper.load_audio(tmp_path)
 finally:
-    # ── Delete temp WAV — log warning if it fails but don't raise ─────────
+    # ── Delete temp WAV - log warning if it fails but don't raise ─────────
     try:
         os.remove(tmp_path)
         logger.debug("Deleted temp WAV: %s", tmp_path)
@@ -245,7 +245,7 @@ Download and extract audio from a platform URL using yt-dlp.
 
 ```
 Uses the ffmpeg binary bundled with imageio-ffmpeg (installed via pip
-as a moviepy dependency) — no system ffmpeg install or admin rights needed.
+as a moviepy dependency) - no system ffmpeg install or admin rights needed.
 
 With the bundled ffmpeg available, yt-dlp can:
   • Handle MPEG-TS / fragmented MP4 containers (Dailymotion, YouTube etc.)
@@ -260,7 +260,7 @@ import yt_dlp
 ffmpeg_path = _get_bundled_ffmpeg()
 
 if ffmpeg_path:
-    # ── Full quality mode — bundled ffmpeg available ───────────────────────
+    # ── Full quality mode - bundled ffmpeg available ───────────────────────
     # Use FFmpegExtractAudio postprocessor to get clean m4a output
     # yt-dlp will use our bundled ffmpeg, not the system one
     ydl_opts = {
@@ -293,7 +293,7 @@ if ffmpeg_path:
         "socket_timeout":    30,
     }
 else:
-    # ── Fallback mode — no ffmpeg at all ──────────────────────────────────
+    # ── Fallback mode - no ffmpeg at all ──────────────────────────────────
     # Request only formats that don't need remuxing
     logger.warning(
         "imageio-ffmpeg not found. Falling back to no-remux format selection. "
@@ -361,8 +361,8 @@ Downloads to project TEMP_DIR (not system temp) for predictable paths
 and to avoid Windows permission issues with system temp directories.
 
 SSL retry strategy:
-  Attempt 1 — normal SSL verification.
-  Attempt 2 — SSL verification disabled (corporate proxy / SSL inspection).
+  Attempt 1 - normal SSL verification.
+  Attempt 2 - SSL verification disabled (corporate proxy / SSL inspection).
 """
 try:
     import yt_dlp  # noqa: F401
@@ -401,7 +401,7 @@ try:
 
     audio_path = os.path.normpath(audio_path)
     logger.info(
-        "Downloaded: %s (%.1f MB) — converting via moviepy …",
+        "Downloaded: %s (%.1f MB) - converting via moviepy ...",
         os.path.basename(audio_path),
         os.path.getsize(audio_path) / (1024 * 1024),
     )
@@ -443,12 +443,12 @@ JSON schema
 {
   "source":   "<original path or URL>",
   "text":     "<full transcript>",
-  "segments": [{"start": 0.0, "end": 3.4, "text": "…"}, …]
+  "segments": [{"start": 0.0, "end": 3.4, "text": "..."}, ...]
 }
 """
 json_path = _json_cache_path(source)
 if os.path.exists(json_path):
-    logger.info("Cache hit — skipping transcription: %s", source[:80])
+    logger.info("Cache hit - skipping transcription: %s", source[:80])
     return json_path
 
 logger.info("Starting transcription: %s", source[:80])
@@ -459,7 +459,7 @@ audio_np = (
     else _extract_audio_from_file(source)
 )
 
-logger.info("Running Whisper transcription locally …")
+logger.info("Running Whisper transcription locally ...")
 result = _get_whisper().transcribe(audio_np)
 
 segments = [
@@ -486,7 +486,6 @@ logger.info(
     len(result.get("text", "").split()),
 )
 return json_path
-```
 
 def transcribe_video(source: str) -> str:
 “”“Alias for transcribe(). Kept for backward compatibility.”””

@@ -1,10 +1,11 @@
+from **future** import annotations
 “””
-query_handler.py — High-level query orchestration for video and KB sources.
+query_handler.py - High-level query orchestration for video and KB sources.
 
 Each public function:
 
 1. Checks long-term QA memory (returns cached answer immediately if found)
-1. Retrieves from FAISS → reranks → expands neighbours
+1. Retrieves from FAISS -> reranks -> expands neighbours
 1. Calls answer_engine which skips the LLM for whichever source has no context
 1. Saves the answer back to QA memory
 1. Returns a structured dict
@@ -16,7 +17,11 @@ get_kb_answer   (query, pdf_index_tuple,   llm, embeddings, entity_memory, **kw)
 get_combined_answer(query, video_tuple, pdf_tuple, llm, embeddings, entity_memory, **kw) -> dict
 “””
 
-from **future** import annotations
+import os
+import sys
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(**file**)))
+if _PROJECT_ROOT not in sys.path:
+sys.path.insert(0, _PROJECT_ROOT)
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -51,7 +56,7 @@ rerank_k: int,
 neighbor_window: int,
 embeddings,
 ) -> List[Document]:
-“”“Retrieve → rerank → expand neighbours. Returns [] if index is None.”””
+“”“Retrieve -> rerank -> expand neighbours. Returns [] if index is None.”””
 if index is None:
 return []
 docs = index.similarity_search(query, k=min(top_k, 30))
@@ -223,7 +228,7 @@ if all_docs and not (video_cached and kb_cached):
     logger.info("Calling LLM with %d total docs.", len(all_docs))
     ans_dict = answer_from_docs(query, all_docs, llm, entity_memory, embeddings)
 else:
-    logger.info("Both sources served from QA cache — skipping LLM call.")
+    logger.info("Both sources served from QA cache - skipping LLM call.")
     ans_dict = {"video": _NO_VIDEO_ANS, "kb": _NO_KB_ANS}
 
 # ── Video result ──────────────────────────────────────────────────────────

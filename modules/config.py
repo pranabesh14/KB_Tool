@@ -1,5 +1,5 @@
 “””
-config.py — Central configuration and environment setup for KB Tool.
+config.py - Central configuration and environment setup for KB Tool.
 All constants, directory paths, and env vars are managed here.
 “””
 
@@ -18,7 +18,7 @@ AZURE_OPENAI_API_VERSION = os.getenv(“AZURE_OPENAI_API_VERSION”, “2024-02-
 AZURE_DEPLOYMENT_CHAT    = os.getenv(“AZURE_DEPLOYMENT_CHAT”, “gpt-4o”)
 AZURE_DEPLOYMENT_EMBED   = os.getenv(“AZURE_DEPLOYMENT_EMBED”, “text-embedding-ada-002”)
 
-# ─── HuggingFace (optional – for local cross-encoder / embeddings) ─────────────
+# ─── HuggingFace (optional - for local cross-encoder / embeddings) ─────────────
 
 HUGGINGFACE_API_KEY = os.getenv(“HUGGINGFACE_API_KEY”, “”)
 
@@ -60,24 +60,24 @@ ELAB_THRESHOLD   = 0.65   # cosine similarity threshold for elaboration detectio
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
-# Rotating log: max 5 MB per file, keep last 3 files → max 15 MB on disk
+# Rotating log: max 5 MB per file, keep last 3 files -> max 15 MB on disk
 
 _LOG_MAX_BYTES  = 5 * 1024 * 1024   # 5 MB
 _LOG_BACKUP_COUNT = 3
 
-_FILE_FMT    = “%(asctime)s [%(levelname)-8s] %(name)s — %(message)s”
-_CONSOLE_FMT = “[%(levelname)-8s] %(name)s — %(message)s”
+_FILE_FMT    = “%(asctime)s [%(levelname)-8s] %(name)s - %(message)s”
+_CONSOLE_FMT = “[%(levelname)-8s] %(name)s - %(message)s”
 _DATE_FMT    = “%Y-%m-%d %H:%M:%S”
 
 def get_logger(name: str = “kb_tool”) -> logging.Logger:
 “””
 Return a named logger writing to:
-• kb_tool.log  (rotating, DEBUG+)  — full detail for troubleshooting
-• stderr       (WARNING+)          — only important messages in the terminal
+- kb_tool.log  (rotating, DEBUG+)  - full detail for troubleshooting
+- stderr       (WARNING+)          - only important messages in the terminal
 “””
 logger = logging.getLogger(name)
 if logger.hasHandlers():
-return logger                   # already configured — return as-is
+return logger                   # already configured - return as-is
 
 ```
 logger.setLevel(logging.DEBUG)
@@ -100,4 +100,3 @@ sh.setFormatter(logging.Formatter(_CONSOLE_FMT, datefmt=_DATE_FMT))
 logger.addHandler(sh)
 
 return logger
-```

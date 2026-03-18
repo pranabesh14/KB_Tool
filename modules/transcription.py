@@ -5,12 +5,12 @@ transcription.py - Video/audio transcription pipeline.
 
 1. Local file  (.mp4, .mkv, .avi, .mov, .webm, .m4v, .flv, .wmv, .ts, .mpg,
    .mp3, .wav, .aac, .flac, .ogg, .m4a)
-   → moviepy extracts audio (bundled ffmpeg, no system install needed)
-   → Whisper transcribes locally
+   -> moviepy extracts audio (bundled ffmpeg, no system install needed)
+   -> Whisper transcribes locally
 1. Platform URL  (Dailymotion, Vimeo, and 1000+ sites supported by yt-dlp)
-   → yt-dlp downloads audio-only stream to a temp file
-   → SSL errors handled with automatic retry using –no-check-certificate
-   → Whisper transcribes locally
+   -> yt-dlp downloads audio-only stream to a temp file
+   -> SSL errors handled with automatic retry using –no-check-certificate
+   -> Whisper transcribes locally
 
 Whisper runs 100% locally on your machine (openai-whisper package).
 Model weights download once to ~/.cache/whisper/ on first use (~74 MB for base).
@@ -116,12 +116,53 @@ return source.startswith(“http://”) or source.startswith(“https://”)
 # ─── Cache helpers ─────────────────────────────────────────────────────────────
 
 def *cache_key(source: str) -> str:
-return “transcript*” + hashlib.md5(source.encode()).hexdigest()[:12]
+# Use only the hex digest - guaranteed ASCII alphanumeric, safe on all OS
+return “transcript*” + hashlib.md5(source.encode(“utf-8”)).hexdigest()[:12]
 
 def _json_cache_path(source: str) -> str:
-return os.path.join(DATA_DIR, _cache_key(source) + “.json”)
+key  = _cache_key(source)
+path = os.path.join(DATA_DIR, key + “.json”)
+# Ensure path is normalised and contains only valid characters
+return os.path.normpath(path)
 
-# ─── Shared audio → numpy converter (uses moviepy bundled ffmpeg) ─────────────
+# ─── Shared audio -> numpy converter (uses moviepy bundled ffmpeg) ─────────────
+
+def _load_wav_direct(file_path: str) -> np.ndarray:
+“””
+Load a WAV file directly into a float32 numpy array at 16kHz mono.
+Uses scipy.io.wavfile - no ffmpeg binary needed at all.
+Whisper expects float32, 16kHz, mono.
+“””
+from scipy.io import wavfile
+from scipy.signal import resample_poly
+from math import gcd
+
+```
+rate, data = wavfile.read(file_path)
+
+# Convert to float32 in range [-1, 1]
+if data.dtype == np.int16:
+    data = data.astype(np.float32) / 32768.0
+elif data.dtype == np.int32:
+    data = data.astype(np.float32) / 2147483648.0
+elif data.dtype == np.uint8:
+    data = (data.astype(np.float32) - 128.0) / 128.0
+else:
+    data = data.astype(np.float32)
+
+# Convert stereo to mono by averaging channels
+if data.ndim == 2:
+    data = data.mean(axis=1)
+
+# Resample to 16kHz if needed
+target_rate = 16000
+if rate != target_rate:
+    logger.info("Resampling WAV from %dHz to %dHz", rate, target_rate)
+    g = gcd(rate, target_rate)
+    data = resample_poly(data, target_rate // g, rate // g).astype(np.float32)
+
+return data
+```
 
 def _convert_to_numpy(file_path: str) -> np.ndarray:
 “””
@@ -139,9 +180,18 @@ not found due to mixed slashes or premature cleanup).
 """
 ext = os.path.splitext(file_path)[1].lower()
 
-# ── Fast path - Whisper reads these natively, no moviepy needed ───────────
+# ── Fast path for WAV - read directly without ffmpeg ──────────────────────
+# whisper.load_audio() calls ffmpeg internally even for WAV files.
+# On restricted systems without system ffmpeg we read WAV directly
+# using scipy which needs no external binary.
+if ext == ".wav":
+    logger.info("Loading WAV directly via scipy: %s", os.path.basename(file_path))
+    return _load_wav_direct(file_path)
+
+# For mp3/flac/ogg fall back to whisper.load_audio()
+# These formats won't come from yt-dlp since we output wav via ffmpeg
 if ext in _DIRECT_AUDIO_EXTENSIONS:
-    logger.info("Loading audio directly via Whisper: %s", os.path.basename(file_path))
+    logger.info("Loading audio via Whisper loader: %s", os.path.basename(file_path))
     return whisper.load_audio(file_path)
 
 # ── moviepy path ───────────────────────────────────────────────────────────
@@ -498,47 +548,52 @@ download_dir    = os.path.normpath(os.path.join(TEMP_DIR, f"dl_{uuid.uuid4().hex
 os.makedirs(download_dir, exist_ok=True)
 output_template = os.path.join(download_dir, "audio.%(ext)s")
 
-try:
-    # ── Attempt 1: normal SSL ──────────────────────────────────────────────
-    logger.info("Downloading audio stream from: %s", url)
-    audio_path = _ydl_download(url, output_template, verify_ssl=True)
+# ── Attempt 1: normal SSL ────────────────────────────────────────────────
+logger.info("Downloading audio stream from: %s", url)
+audio_path = _ydl_download(url, output_template, verify_ssl=True)
 
-    # ── Attempt 2: retry without SSL verification ──────────────────────────
-    if audio_path is None:
-        logger.warning(
-            "SSL error on first attempt. Retrying with SSL verification "
-            "disabled (likely corporate proxy / SSL inspection)."
-        )
-        audio_path = _ydl_download(url, output_template, verify_ssl=False)
+# ── Attempt 2: retry without SSL verification ─────────────────────────────
+if audio_path is None:
+    logger.warning(
+        "SSL error on first attempt. Retrying with SSL verification "
+        "disabled (likely corporate proxy / SSL inspection)."
+    )
+    audio_path = _ydl_download(url, output_template, verify_ssl=False)
 
-    if not audio_path or not os.path.isfile(audio_path):
-        raise RuntimeError(
-            f"yt-dlp could not download audio from: {url}\n"
-            "Possible causes:\n"
-            "  • URL is not supported by yt-dlp\n"
-            "  • Video is private or geo-restricted\n"
-            "  • Network / firewall is blocking the download\n"
-            "Tip: run  yt-dlp --list-formats <url>  to diagnose."
-        )
-
-    audio_path = os.path.normpath(audio_path)
-    logger.info(
-        "Downloaded: %s (%.1f MB) - converting via moviepy ...",
-        os.path.basename(audio_path),
-        os.path.getsize(audio_path) / (1024 * 1024),
+if not audio_path or not os.path.isfile(audio_path):
+    shutil.rmtree(download_dir, ignore_errors=True)
+    raise RuntimeError(
+        f"yt-dlp could not download audio from: {url}\n"
+        "Possible causes:\n"
+        "  • URL is not supported by yt-dlp\n"
+        "  • Video is private or geo-restricted\n"
+        "  • Network / firewall is blocking the download\n"
+        "Tip: run  yt-dlp --list-formats <url>  to diagnose."
     )
 
-    # ── Convert via moviepy (bundled ffmpeg) ───────────────────────────────
-    return _convert_to_numpy(audio_path)
+audio_path = os.path.normpath(audio_path)
+logger.info(
+    "Downloaded: %s (%.1f MB) - converting via moviepy ...",
+    os.path.basename(audio_path),
+    os.path.getsize(audio_path) / (1024 * 1024),
+)
 
+# ── Convert FIRST, clean up AFTER numpy array is fully loaded ─────────────
+# CRITICAL: do NOT put cleanup in a finally block - on Windows the finally
+# runs before _convert_to_numpy finishes reading, causing WinError 2.
+try:
+    audio_np = _convert_to_numpy(audio_path)
 finally:
-    # ── Clean up the download subfolder entirely ───────────────────────────
+    # Cleanup runs AFTER _convert_to_numpy returns or raises
+    # At this point the file has been fully read into memory
     try:
         shutil.rmtree(download_dir, ignore_errors=True)
         logger.debug("Cleaned up download dir: %s", download_dir)
     except Exception as exc:
         logger.warning("Could not clean up download dir %s: %s", download_dir, exc)
-```
+
+return audio_np
+
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -546,7 +601,6 @@ def transcribe(source: str) -> str:
 “””
 Transcribe a local video/audio file OR a platform URL.
 
-```
 Parameters
 ----------
 source : str
@@ -602,13 +656,13 @@ with open(json_path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 logger.info(
-    "Transcript saved → %s  (%d segments, ~%d words)",
+    "Transcript saved -> %s  (%d segments, ~%d words)",
     os.path.basename(json_path),
     len(segments),
     len(result.get("text", "").split()),
 )
 return json_path
-```
+
 
 def transcribe_video(source: str) -> str:
 “”“Alias for transcribe(). Kept for backward compatibility.”””

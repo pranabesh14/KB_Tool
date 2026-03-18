@@ -1,11 +1,12 @@
 “””
-app.py — Streamlit front-end for KB Tool.
+app.py - Streamlit front-end for KB Tool.
 
 Responsibilities (UI layer only):
-• File upload & video URL input
-• “Process” button → delegate to vector_store helpers
-• Chat interface → delegate to query_handler
-• Sidebar: New Chat + recent chat history
+
+- File upload & video URL input
+- “Process” button -> delegate to vector_store helpers
+- Chat interface -> delegate to query_handler
+- Sidebar: New Chat + recent chat history
 
 All heavy logic lives in the modules/ package.
 “””
@@ -46,7 +47,20 @@ get_logger,
 logger = get_logger(“app”)
 from modules.llm_client import init_llm_and_embeddings
 from modules.meta_store import load_meta, save_meta, scan_data_dir
-from modules.transcription import transcribe, is_supported_video
+from modules.transcription import transcribe, is_supported_video, _get_ffmpeg_dir_for_ytdlp
+
+# Pre-check bundled ffmpeg at startup so any download happens early
+
+@st.cache_resource
+def _preload_ffmpeg():
+ffmpeg_dir = _get_ffmpeg_dir_for_ytdlp()
+if ffmpeg_dir:
+logger.info(“Bundled ffmpeg ready at startup: %s”, ffmpeg_dir)
+else:
+logger.warning(“Bundled ffmpeg not available at startup - URL transcription may fail”)
+return ffmpeg_dir
+
+_ffmpeg_dir = _preload_ffmpeg()
 from modules.vector_store import load_index, update_index_incremental
 from modules.document_loader import expected_source_for_file
 from modules.query_handler import get_combined_answer
@@ -221,13 +235,13 @@ st.markdown(”””
 🧠 Knowledge Explorer
 </div>
 <div style="text-align:center; font-size:20px; color:#FFD580; margin-top:5px;">
-Upload · Ask · Discover
+Upload - Ask - Discover
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown(”—”)
 
-# ── First-run banner — shown when no files have been indexed yet ───────────────
+# ── First-run banner - shown when no files have been indexed yet ───────────────
 
 if st.session_state.vs_pdf is None and st.session_state.vs_video is None:
 st.info(
@@ -284,7 +298,7 @@ logger.info(“Video file uploaded: %s”, vf.name)
 save_meta(meta)
 
 video_urls_input = st.text_input(
-“🌐 Or paste platform video URLs (Dailymotion, Vimeo, etc.) — comma-separated”,
+“🌐 Or paste platform video URLs (Dailymotion, Vimeo, etc.) - comma-separated”,
 key=f”video_urls_{st.session_state.new_chat_count}”,
 help=“Supports any site yt-dlp can handle. SSL errors are retried automatically.”,
 )
@@ -305,7 +319,7 @@ meta = load_meta()
 # ── Transcribe platform URLs ───────────────────────────────────────────
 if video_urls_input.strip():
     urls = [u.strip() for u in video_urls_input.split(",") if u.strip()]
-    with st.spinner(f"Downloading & transcribing {len(urls)} URL(s)…"):
+    with st.spinner(f"Downloading & transcribing {len(urls)} URL(s)..."):
         for url in urls:
             try:
                 jpath = transcribe(url)
@@ -322,7 +336,7 @@ if video_urls_input.strip():
 # ── Transcribe newly uploaded video files ─────────────────────────────
 raw_videos = st.session_state.get("raw_video_files", [])
 if raw_videos:
-    with st.spinner(f"Transcribing {len(raw_videos)} uploaded video(s)…"):
+    with st.spinner(f"Transcribing {len(raw_videos)} uploaded video(s)..."):
         for video_path in raw_videos:
             try:
                 jpath = transcribe(video_path)
@@ -337,7 +351,7 @@ if raw_videos:
         save_meta(meta)
 
 # ── Update PDF index ───────────────────────────────────────────────────
-with st.spinner("Updating document index…"):
+with st.spinner("Updating document index..."):
     try:
         vs_pdf, pdf_store, added_pdf = update_index_incremental(
             st.session_state.pdf_files, embeddings, INDEX_DIR_PDF
@@ -358,7 +372,7 @@ with st.spinner("Updating document index…"):
         st.error(f"❌ Document indexing failed:\n{exc}")
 
 # ── Update Video index ─────────────────────────────────────────────────
-with st.spinner("Updating video index…"):
+with st.spinner("Updating video index..."):
     try:
         vs_vid, vid_store, added_vid = update_index_incremental(
             st.session_state.video_jsons, embeddings, INDEX_DIR_VIDEO
@@ -398,7 +412,7 @@ with st.chat_message(“user”):
 st.markdown(user_q)
 
 ```
-with st.spinner("Thinking…"):
+with st.spinner("Thinking..."):
     result = get_combined_answer(
         user_q,
         (st.session_state.vs_video, st.session_state.vs_video_store),
@@ -411,7 +425,7 @@ with st.spinner("Thinking…"):
         neighbor_window=NEIGHBOR_WINDOW,
     )
 
-logger.info("Answer generated — has_video=%s, has_kb=%s", result["has_video"], result["has_kb"])
+logger.info("Answer generated - has_video=%s, has_kb=%s", result["has_video"], result["has_kb"])
 
 # ── Format response ────────────────────────────────────────────────────
 sections = []
@@ -450,4 +464,4 @@ st.session_state.messages.append({"role": "assistant", "content": answer_md})
 _save_or_update_chat_history()
 ```
 
-st.caption(“💡 Tip: Click Process only when adding new files/videos — existing knowledge is reused automatically.”)
+st.caption(“💡 Tip: Click Process only when adding new files/videos - existing knowledge is reused automatically.”)

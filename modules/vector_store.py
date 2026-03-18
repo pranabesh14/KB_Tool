@@ -1,10 +1,11 @@
 “””
-vector_store.py — FAISS index management (build / load / incremental update).
+vector_store.py - FAISS index management (build / load / incremental update).
 
 Each index directory contains:
-• FAISS binary files  (index.faiss, index.pkl)
-• doc_store.json      – ordered mapping: source → [{“content”: …, “metadata”: …}]
-used for neighbour-chunk expansion at query time.
+
+- FAISS binary files  (index.faiss, index.pkl)
+- doc_store.json      - ordered mapping: source -> [{“content”: …, “metadata”: …}]
+  used for neighbour-chunk expansion at query time.
 
 ## Public API
 
@@ -106,11 +107,11 @@ index_pkl   = os.path.join(index_dir, “index.pkl”)
 
 ```
 if not os.path.isdir(index_dir):
-    logger.info("First run — index directory not created yet: %s", index_dir)
+    logger.info("First run - index directory not created yet: %s", index_dir)
     return None, {}
 
 if not os.path.isfile(index_faiss) or not os.path.isfile(index_pkl):
-    logger.info("First run — index files not built yet in: %s", index_dir)
+    logger.info("First run - index files not built yet in: %s", index_dir)
     return None, {}
 
 try:
@@ -163,11 +164,11 @@ if failed_files:
     logger.warning("These files produced no chunks: %s", ", ".join(failed_files))
 
 if not new_docs:
-    logger.warning("No documents to index — all files failed to load for %s.", index_dir)
+    logger.warning("No documents to index - all files failed to load for %s.", index_dir)
     return vs_existing, doc_store, []
 
-# Build FAISS index — let this raise so the caller sees embedding errors
-logger.info("Building FAISS index for %d chunks in %s …", len(new_docs), index_dir)
+# Build FAISS index - let this raise so the caller sees embedding errors
+logger.info("Building FAISS index for %d chunks in %s ...", len(new_docs), index_dir)
 try:
     vs_new = FAISS.from_documents(new_docs, embeddings)
 except Exception as exc:
@@ -187,8 +188,7 @@ os.makedirs(index_dir, exist_ok=True)
 vs_existing.save_local(index_dir)
 _save_doc_store(doc_store, index_dir)
 logger.info(
-    "Index updated at %s — added %d source(s), %d chunks.",
+    "Index updated at %s - added %d source(s), %d chunks.",
     index_dir, len(added_sources), len(new_docs)
 )
 return vs_existing, doc_store, added_sources
-```

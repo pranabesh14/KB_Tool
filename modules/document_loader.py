@@ -1,11 +1,12 @@
 “””
-document_loader.py — Load and chunk documents into LangChain Documents.
+document_loader.py - Load and chunk documents into LangChain Documents.
 
 Supported inputs:
-• PDF  (.pdf)  – extracted with PyPDF2, chunked with RecursiveCharacterTextSplitter
-• Text (.txt)  – read directly, same chunker
-• Video JSON   – transcript produced by transcription.py; grouped into ~1000-char chunks
-with timing metadata (start_time / end_time per chunk)
+
+- PDF  (.pdf)  - extracted with PyPDF2, chunked with RecursiveCharacterTextSplitter
+- Text (.txt)  - read directly, same chunker
+- Video JSON   - transcript produced by transcription.py; grouped into ~1000-char chunks
+  with timing metadata (start_time / end_time per chunk)
 
 Every returned Document carries:
 metadata = {
@@ -139,10 +140,10 @@ def load_and_split_document(path: str) -> List[Document]:
 “””
 Load a single file and return a list of chunked LangChain Documents.
 Logs the error and returns [] on failure so the caller can continue
-processing other files — but the error is visible in the log.
+processing other files - but the error is visible in the log.
 “””
 if not os.path.isfile(path):
-logger.error(“File not found — skipping: %s”, path)
+logger.error(“File not found - skipping: %s”, path)
 return []
 
 ```
@@ -157,7 +158,7 @@ try:
             text = _load_text(path)
 
         if not text.strip():
-            logger.warning("File produced no text — is it empty or scanned? %s", path)
+            logger.warning("File produced no text - is it empty or scanned? %s", path)
             return []
 
         docs = _chunk_text_doc(text, source_name)
@@ -171,7 +172,7 @@ try:
 except Exception as exc:
     logger.error("Failed to load %s: %s", os.path.basename(path), exc, exc_info=True)
     return []
-```
+
 
 def expected_source_for_file(path: str) -> str:
 “””

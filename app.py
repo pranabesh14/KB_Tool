@@ -39,7 +39,7 @@ from langchain.memory import ConversationEntityMemory  # type: ignore
 # ── Internal modules ──────────────────────────────────────────────────────────
 
 from modules.config import (
-DATA_DIR, INDEX_DIR_PDF, INDEX_DIR_VIDEO,
+DATA_DIR, INDEX_DIR_PDF, INDEX_DIR_VIDEO, INDEX_DIR_CONFLUENCE,
 TOP_K_RETRIEVAL, RERANK_K, NEIGHBOR_WINDOW,
 get_logger,
 )
@@ -64,6 +64,11 @@ _ffmpeg_dir = _preload_ffmpeg()
 from modules.vector_store import load_index, update_index_incremental
 from modules.document_loader import expected_source_for_file
 from modules.query_handler import get_combined_answer
+from modules.confluence_crawler import crawl_confluence_url
+from modules.sharepoint_crawler import crawl_sharepoint_url
+from modules.confluence_auth import clear_token_cache
+from modules.confluence_crawler import crawl_confluence_url
+from modules.confluence_auth import clear_token_cache
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -89,16 +94,19 @@ llm, embeddings = init_llm_and_embeddings()
 
 def _init_session():
 defaults = {
-“messages”:          [],
-“chat_history”:      [],
-“new_chat_count”:    0,
-“pdf_files”:         [],
-“video_jsons”:       [],
-“current_chat_index”: None,
-“vs_pdf”:            None,
-“vs_pdf_store”:      {},
-“vs_video”:          None,
-“vs_video_store”:    {},
+“messages”:             [],
+“chat_history”:         [],
+“new_chat_count”:       0,
+“pdf_files”:            [],
+“video_jsons”:          [],
+“confluence_urls”:      [],
+“current_chat_index”:   None,
+“vs_pdf”:               None,
+“vs_pdf_store”:         {},
+“vs_video”:             None,
+“vs_video_store”:       {},
+“vs_confluence”:        None,
+“vs_confluence_store”:  {},
 }
 for k, v in defaults.items():
 if k not in st.session_state:
@@ -123,36 +131,45 @@ try:
 meta = load_meta()
 meta = scan_data_dir(meta)
 save_meta(meta)
-
-```
-    vs_pdf,   pdf_store  = load_index(INDEX_DIR_PDF,   embeddings)
-    vs_video, vid_store  = load_index(INDEX_DIR_VIDEO, embeddings)
-    logger.info(
-        "Startup load complete. PDF index: %s, Video index: %s",
-        "loaded" if vs_pdf   else "empty (upload files and click Process)",
-        "loaded" if vs_video else "empty (upload files and click Process)",
-    )
-    return meta, vs_pdf, pdf_store, vs_video, vid_store
+vs_pdf,   pdf_store  = load_index(INDEX_DIR_PDF,         embeddings)
+vs_video, vid_store  = load_index(INDEX_DIR_VIDEO,       embeddings)
+vs_conf,  conf_store = load_index(INDEX_DIR_CONFLUENCE,  embeddings)
+vs_sp,    sp_store   = load_index(INDEX_DIR_SHAREPOINT,  embeddings)
+logger.info(
+“Startup: PDF=%s, Video=%s, Confluence=%s, SharePoint=%s”,
+“loaded” if vs_pdf   else “empty”,
+“loaded” if vs_video else “empty”,
+“loaded” if vs_conf  else “empty”,
+“loaded” if vs_sp    else “empty”,
+)
+return meta, vs_pdf, pdf_store, vs_video, vid_store, vs_conf, conf_store, vs_sp, sp_store
 except Exception as exc:
-    logger.error("Startup load failed: %s", exc)
-    return {}, None, {}, None, {}
-```
+logger.error(“Startup load failed: %s”, exc)
+return {}, None, {}, None, {}, None, {}, None, {}
 
-_meta, _vs_pdf, _pdf_store, _vs_video, _vid_store = _startup_load()
-
-# Inject into session state (only if not already set from a previous rerun)
+_meta, _vs_pdf, _pdf_store, _vs_video, _vid_store, _vs_conf, _conf_store, _vs_sp, _sp_store = _startup_load()
 
 if st.session_state.vs_pdf is None:
-st.session_state.vs_pdf       = _vs_pdf
-st.session_state.vs_pdf_store = _pdf_store
+st.session_state.vs_pdf              = _vs_pdf
+st.session_state.vs_pdf_store        = _pdf_store
 if st.session_state.vs_video is None:
-st.session_state.vs_video       = _vs_video
-st.session_state.vs_video_store = _vid_store
+st.session_state.vs_video            = _vs_video
+st.session_state.vs_video_store      = _vid_store
+if st.session_state.vs_confluence is None:
+st.session_state.vs_confluence       = _vs_conf
+st.session_state.vs_confluence_store = _conf_store
+if st.session_state.vs_sharepoint is None:
+st.session_state.vs_sharepoint       = _vs_sp
+st.session_state.vs_sharepoint_store = _sp_store
 
 if not st.session_state.pdf_files:
-st.session_state.pdf_files   = list(_meta.get(“pdfs”,   []))
+st.session_state.pdf_files       = list(_meta.get(“pdfs”,            []))
 if not st.session_state.video_jsons:
-st.session_state.video_jsons = list(_meta.get(“videos”, []))
+st.session_state.video_jsons     = list(_meta.get(“videos”,          []))
+if not st.session_state.confluence_urls:
+st.session_state.confluence_urls = list(_meta.get(“confluence_urls”, []))
+if not st.session_state.sharepoint_urls:
+st.session_state.sharepoint_urls = list(_meta.get(“sharepoint_urls”, []))
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -162,6 +179,72 @@ st.session_state.video_jsons = list(_meta.get(“videos”, []))
 
 def _new_entity_memory():
 return ConversationEntityMemory(llm=llm, k=10)
+
+def _crawl_and_index(
+urls_str: str, crawl_fn, index_dir: str,
+session_key: str, store_key: str,
+meta_key: str, label: str, meta: dict,
+) -> None:
+“””
+Shared helper: crawl a list of URLs, index into FAISS, update session state.
+Used for both Confluence and SharePoint.
+“””
+import json
+from langchain_community.vectorstores import FAISS as FAISSStore
+
+```
+urls      = [u.strip() for u in urls_str.split(",") if u.strip()]
+all_docs  = []
+
+with st.spinner(f"Fetching {len(urls)} {label} URL(s)..."):
+    for url in urls:
+        try:
+            docs = crawl_fn(url)
+            all_docs.extend(docs)
+            if url not in st.session_state.get(f"{label.lower()}_urls", []):
+                st.session_state.setdefault(f"{label.lower()}_urls", []).append(url)
+            meta.setdefault(meta_key, [])
+            if url not in meta[meta_key]:
+                meta[meta_key].append(url)
+            st.success(f"✅ {label}: fetched {len(docs)} chunks from {url}")
+            logger.info("%s crawl: %d chunks from %s", label, len(docs), url)
+        except Exception as exc:
+            logger.error("%s crawl failed for %s: %s", label, url, exc, exc_info=True)
+            st.error(f"❌ {label} failed: {url}\n{exc}")
+
+if not all_docs:
+    return
+
+with st.spinner(f"Indexing {label} content ({len(all_docs)} chunks)..."):
+    try:
+        vs_existing, doc_store = load_index(index_dir, embeddings)
+
+        # Build doc_store entries
+        for d in all_docs:
+            src = (d.metadata or {}).get("source", label.lower())
+            doc_store.setdefault(src, []).append({
+                "content": d.page_content, "metadata": d.metadata or {}
+            })
+
+        vs_new = FAISSStore.from_documents(all_docs, embeddings)
+        if vs_existing is None:
+            vs_existing = vs_new
+        else:
+            vs_existing.merge_from(vs_new)
+
+        os.makedirs(index_dir, exist_ok=True)
+        vs_existing.save_local(index_dir)
+        with open(os.path.join(index_dir, "doc_store.json"), "w", encoding="utf-8") as f:
+            json.dump(doc_store, f, ensure_ascii=False, indent=2)
+
+        st.session_state[session_key] = vs_existing
+        st.session_state[store_key]   = doc_store
+        st.success(f"✅ {label} index updated with {len(all_docs)} chunks.")
+        logger.info("%s index updated: %d chunks", label, len(all_docs))
+    except Exception as exc:
+        logger.error("%s indexing failed: %s", label, exc, exc_info=True)
+        st.error(f"❌ {label} indexing failed:\n{exc}")
+```
 
 def _generate_chat_title(messages: list) -> str:
 for msg in messages:
@@ -201,6 +284,8 @@ if st.button(“➕ New Chat”):
 st.session_state.messages          = []
 st.session_state.pdf_files         = []
 st.session_state.video_jsons       = []
+st.session_state.confluence_urls   = []
+st.session_state.sharepoint_urls   = []
 st.session_state.new_chat_count   += 1
 st.session_state.entity_memory     = _new_entity_memory()
 st.session_state.current_chat_index = None
@@ -303,6 +388,29 @@ key=f”video_urls_{st.session_state.new_chat_count}”,
 help=“Supports any site yt-dlp can handle. SSL errors are retried automatically.”,
 )
 
+st.markdown(”—”)
+
+# ── Confluence + SharePoint inputs ────────────────────────────────────────────
+
+c1, c2, c3 = st.columns([3, 3, 1])
+with c1:
+confluence_urls_input = st.text_input(
+“🔗 Confluence Page URLs (comma-separated)”,
+key=f”conf_urls_{st.session_state.new_chat_count}”,
+help=“Pages will be fetched + 2 levels of internal links followed automatically.”,
+)
+with c2:
+sharepoint_urls_input = st.text_input(
+“📁 SharePoint URLs (comma-separated)”,
+key=f”sp_urls_{st.session_state.new_chat_count}”,
+help=“Paste a SharePoint file, folder, or document library URL.”,
+)
+with c3:
+st.markdown(”<br>”, unsafe_allow_html=True)
+if st.button(“🔓 Re-auth”, help=“Clear cached Azure AD token and re-authenticate”):
+clear_token_cache()
+st.success(“Token cleared - you will be prompted to log in on next Process.”)
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Process button
@@ -389,6 +497,34 @@ with st.spinner("Updating video index..."):
     except Exception as exc:
         logger.error("Video indexing failed: %s", exc, exc_info=True)
         st.error(f"❌ Video indexing failed:\n{exc}")
+
+# ── Crawl + index Confluence pages ────────────────────────────────────
+if confluence_urls_input.strip():
+    _crawl_and_index(
+        urls_str=confluence_urls_input,
+        crawl_fn=crawl_confluence_url,
+        index_dir=INDEX_DIR_CONFLUENCE,
+        session_key="vs_confluence",
+        store_key="vs_confluence_store",
+        meta_key="confluence_urls",
+        label="Confluence",
+        meta=meta,
+    )
+    save_meta(meta)
+
+# ── Crawl + index SharePoint content ──────────────────────────────────
+if sharepoint_urls_input.strip():
+    _crawl_and_index(
+        urls_str=sharepoint_urls_input,
+        crawl_fn=crawl_sharepoint_url,
+        index_dir=INDEX_DIR_SHAREPOINT,
+        session_key="vs_sharepoint",
+        store_key="vs_sharepoint_store",
+        meta_key="sharepoint_urls",
+        label="SharePoint",
+        meta=meta,
+    )
+    save_meta(meta)
 ```
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,46 +551,75 @@ st.markdown(user_q)
 with st.spinner("Thinking..."):
     result = get_combined_answer(
         user_q,
-        (st.session_state.vs_video, st.session_state.vs_video_store),
-        (st.session_state.vs_pdf,   st.session_state.vs_pdf_store),
+        (st.session_state.vs_video,      st.session_state.vs_video_store),
+        (st.session_state.vs_pdf,         st.session_state.vs_pdf_store),
         llm,
         embeddings,
         st.session_state.entity_memory,
+        confluence_index_tuple=(
+            st.session_state.vs_confluence,
+            st.session_state.vs_confluence_store
+        ),
+        sharepoint_index_tuple=(
+            st.session_state.vs_sharepoint,
+            st.session_state.vs_sharepoint_store
+        ),
         top_k=TOP_K_RETRIEVAL,
         rerank_k=RERANK_K,
         neighbor_window=NEIGHBOR_WINDOW,
     )
 
-logger.info("Answer generated - has_video=%s, has_kb=%s", result["has_video"], result["has_kb"])
+logger.info(
+    "Answer generated - video=%s, kb=%s, confluence=%s, sharepoint=%s",
+    result["has_video"], result["has_kb"],
+    result["has_confluence"], result["has_sharepoint"]
+)
 
 # ── Format response ────────────────────────────────────────────────────
 sections = []
 
 if result["has_video"]:
-    sections.append(f"""### 🎬 From Video
-```
+    sections.append(
+        f"### 🎬 From Video\n{result['video_answer']}\n\n"
+        f"> 📍 **Timestamp:** {result['video_timestamp']} &nbsp;|&nbsp; "
+        f"**Source:** {result['video_source']}"
+    )
+else:
+    sections.append("### 🎬 From Video\n_No relevant content found in uploaded videos._")
 
-{result[‘video_answer’]}
-
-> 📍 **Timestamp:** {result[‘video_timestamp’]}  |  **Source:** {result[‘video_source’]}”””)
-> else:
-> sections.append(”### 🎬 From Video\n_No relevant content found in uploaded videos._”)
-
-```
 sections.append("---")
 
 if result["has_kb"]:
     kb_src = ", ".join(result["kb_sources"]) if result["kb_sources"] else "N/A"
-    sections.append(f"""### 📄 From Knowledge Base
-```
+    sections.append(
+        f"### 📄 From Knowledge Base\n{result['kb_answer']}\n\n"
+        f"> 📂 **Sources:** {kb_src}"
+    )
+else:
+    sections.append("### 📄 From Knowledge Base\n_No relevant content found in uploaded documents._")
 
-{result[‘kb_answer’]}
+sections.append("---")
 
-> 📂 **Sources:** {kb_src}”””)
-> else:
-> sections.append(”### 📄 From Knowledge Base\n_No relevant content found in uploaded documents._”)
+if result["has_confluence"]:
+    conf_src = ", ".join(result["confluence_sources"]) if result["confluence_sources"] else "N/A"
+    sections.append(
+        f"### 🔗 From Confluence\n{result['confluence_answer']}\n\n"
+        f"> 📂 **Pages:** {conf_src}"
+    )
+else:
+    sections.append("### 🔗 From Confluence\n_No relevant content found in Confluence._")
 
-```
+sections.append("---")
+
+if result["has_sharepoint"]:
+    sp_src = ", ".join(result["sharepoint_sources"]) if result["sharepoint_sources"] else "N/A"
+    sections.append(
+        f"### 📁 From SharePoint\n{result['sharepoint_answer']}\n\n"
+        f"> 📂 **Files:** {sp_src}"
+    )
+else:
+    sections.append("### 📁 From SharePoint\n_No relevant content found in SharePoint._")
+
 answer_md = "\n\n".join(sections)
 
 with st.chat_message("assistant"):

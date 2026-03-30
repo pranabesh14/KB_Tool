@@ -122,21 +122,58 @@ except Exception as exc:
 logger.warning(“Error listing subfolders %s: %s”, folder_rel_path, exc)
 return []
 
-def _get_file_content(site_url: str, server_rel_url: str) -> Optional[bytes]:
-“”“Download a file’s raw bytes from SharePoint.”””
+def _stream_file_to_disk(
+site_url: str, server_rel_url: str, dest_path: str,
+chunk_size: int = 8 * 1024 * 1024,
+) -> bool:
+“””
+Stream a SharePoint file directly to disk in chunks.
+Uses constant RAM (chunk_size per chunk) regardless of file size.
+A 2 GB video uses only 8 MB of ram during download.
+
+
+Parameters
+----------
+chunk_size : int
+    Bytes per chunk (default 8 MB).
+
+Returns True on success, False on failure.
+"""
 encoded = quote(server_rel_url)
 api_url = _sp_api(
-site_url,
-f”web/GetFileByServerRelativeUrl(’{encoded}’)/$value”
+    site_url,
+    f"web/GetFileByServerRelativeUrl('{encoded}')/$value"
 )
 try:
-resp = requests.get(api_url, headers=get_headers(“sharepoint”),
-timeout=120, stream=True)
-resp.raise_for_status()
-return resp.content
+    resp = requests.get(
+        api_url,
+        headers=get_headers("sharepoint"),
+        timeout=300,    # large files need more time
+        stream=True,    # do NOT load into memory
+    )
+    resp.raise_for_status()
+
+    downloaded = 0
+    with open(dest_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=chunk_size):
+            if chunk:   # filter out keep-alive empty chunks
+                f.write(chunk)
+                downloaded += len(chunk)
+
+    mb = downloaded / (1024 * 1024)
+    logger.info("Streamed %.1f MB to disk: %s", mb, os.path.basename(dest_path))
+    return True
+
 except Exception as exc:
-logger.error(“Error downloading %s: %s”, server_rel_url, exc)
-return None
+    logger.error("Error streaming %s: %s", server_rel_url, exc)
+    # Remove partial file if download failed
+    if os.path.exists(dest_path):
+        try:
+            os.remove(dest_path)
+        except Exception:
+            pass
+    return False
+
 
 def _get_single_file_metadata(site_url: str, server_rel_url: str) -> Optional[dict]:
 “”“Get metadata for a single file by its server-relative URL.”””
@@ -176,69 +213,85 @@ return “”
 
 # — Video transcription —————————————————––
 
-def _transcribe_sharepoint_video(
-content: bytes, filename: str, file_url: str
-) -> List[Document]:
+def _transcribe_sharepoint_video(file_path: str, filename: str, file_url: str) -> List[Document]:
 “””
-Save video/audio bytes to TEMP_DIR, transcribe with Whisper,
-return Documents labelled as source_type=“sharepoint_video”.
-“””
+Transcribe a SharePoint video/audio file that has already been streamed to disk.
+File is deleted after transcription.
+
+
+Parameters
+----------
+file_path : str  Path to the video/audio file on disk (in TEMP_DIR).
+filename  : str  Original filename (used for logging and metadata).
+file_url  : str  SharePoint URL (used as source in metadata and cache key).
+
+Returns
+-------
+List[Document] with source_type="sharepoint_video".
+"""
 from modules.transcription import _convert_to_numpy, _get_whisper
 import json as _json
 import hashlib
 from modules.config import DATA_DIR
+from modules.document_loader import _load_video_json
 
+# Check transcript cache first - avoids re-transcribing if already done
+cache_key  = "sp_transcript_" + hashlib.md5(file_url.encode()).hexdigest()[:12]
+cache_path = os.path.normpath(os.path.join(DATA_DIR, cache_key + ".json"))
 
-# Save to temp file
-ext      = os.path.splitext(filename)[1].lower()
-tmp_path = os.path.normpath(
-    os.path.join(TEMP_DIR, f"sp_{uuid.uuid4().hex}{ext}")
-)
+if os.path.exists(cache_path):
+    logger.info("Transcript cache hit for: %s", filename)
+    docs = _load_video_json(cache_path)
+    for d in docs:
+        d.metadata["source_type"] = "sharepoint_video"
+        d.metadata["filename"]    = filename
+    return docs
+
 try:
-    with open(tmp_path, "wb") as f:
-        f.write(content)
-    logger.info("Saved SharePoint video to temp: %s", tmp_path)
+    logger.info("Transcribing SharePoint video: %s (%.1f MB)",
+                filename, os.path.getsize(file_path) / (1024 * 1024))
 
-    # Transcribe
-    audio_np = _convert_to_numpy(tmp_path)
-    result   = _get_whisper().transcribe(audio_np)
+    # Convert to numpy (moviepy extracts audio, no system ffmpeg needed)
+    audio_np = _convert_to_numpy(file_path)
 
-    # Cache transcript as JSON (same format as yt-dlp transcripts)
-    cache_key  = "sp_transcript_" + hashlib.md5(file_url.encode()).hexdigest()[:12]
-    cache_path = os.path.join(DATA_DIR, cache_key + ".json")
-    payload    = {
+    # Transcribe locally with Whisper
+    result = _get_whisper().transcribe(audio_np)
+
+    # Save transcript JSON (same format as yt-dlp + local video transcripts)
+    payload = {
         "source":   file_url,
         "text":     result.get("text", ""),
         "segments": [
-            {"start": float(s.get("start", 0)), "end": float(s.get("end", 0)),
-             "text": (s.get("text") or "").strip()}
+            {
+                "start": float(s.get("start", 0.0)),
+                "end":   float(s.get("end",   0.0)),
+                "text":  (s.get("text") or "").strip(),
+            }
             for s in (result.get("segments") or [])
         ],
     }
     with open(cache_path, "w", encoding="utf-8") as f:
         _json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    # Build Documents from segments (same chunking as video transcripts)
-    from modules.document_loader import _load_video_json
     docs = _load_video_json(cache_path)
-    # Override source_type to distinguish from regular video uploads
     for d in docs:
         d.metadata["source_type"] = "sharepoint_video"
         d.metadata["filename"]    = filename
-    logger.info(
-        "SharePoint video '%s' transcribed -> %d chunks", filename, len(docs)
-    )
+
+    logger.info("SharePoint video '%s' -> %d chunks", filename, len(docs))
     return docs
 
 except Exception as exc:
     logger.error("Transcription failed for %s: %s", filename, exc)
     return []
 finally:
-    if os.path.exists(tmp_path):
+    # Always delete the temp video file - transcript JSON is kept as cache
+    if os.path.exists(file_path):
         try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+            os.remove(file_path)
+            logger.debug("Deleted temp video: %s", file_path)
+        except Exception as del_exc:
+            logger.warning("Could not delete temp file %s: %s", file_path, del_exc)
 
 
 # — Public API ––––––––––––––––––––––––––––––––
@@ -261,7 +314,6 @@ Returns
 List[Document] with source_type "sharepoint", "sharepoint_video",
 or "sharepoint_attachment".
 """
-
 if not SHAREPOINT_BASE_URL:
     raise RuntimeError(
         "SHAREPOINT_BASE_URL is not set in .env\n"
@@ -316,35 +368,65 @@ return all_docs
 def _process_file(
 site_url: str, server_rel_url: str, file_url: str
 ) -> List[Document]:
-“”“Download and process a single SharePoint file.”””
+“””
+Stream and process a single SharePoint file.
+
+Videos/audio: streamed directly to TEMP_DIR (constant RAM usage),
+              then transcribed with Whisper, temp file deleted after.
+Documents:    streamed to TEMP_DIR, text extracted, temp file deleted.
+
+This approach uses only chunk_size RAM (8 MB default) regardless of
+how large the file is - safe for multi-GB video files.
+"""
+
+
 filename = os.path.basename(server_rel_url)
 ext      = os.path.splitext(filename)[1].lower()
-
 
 if ext not in (_DOC_EXTS | _MEDIA_EXTS):
     logger.debug("Skipping unsupported file: %s", filename)
     return []
 
-logger.info("Processing SharePoint file: %s", filename)
-content = _get_file_content(site_url, server_rel_url)
-if not content:
+# Stream file to a temp path in TEMP_DIR
+tmp_path = os.path.normpath(
+    os.path.join(TEMP_DIR, f"sp_{uuid.uuid4().hex}{ext}")
+)
+logger.info("Streaming SharePoint file to disk: %s", filename)
+ok = _stream_file_to_disk(site_url, server_rel_url, tmp_path)
+if not ok:
     return []
 
-# Video / audio -> transcribe with Whisper
-if ext in _MEDIA_EXTS:
-    return _transcribe_sharepoint_video(content, filename, file_url)
+try:
+    # Video / audio -> transcribe with Whisper
+    # _transcribe_sharepoint_video deletes tmp_path in its finally block
+    if ext in _MEDIA_EXTS:
+        return _transcribe_sharepoint_video(tmp_path, filename, file_url)
 
-# Document -> extract text and chunk
-text = _extract_doc_text(content, ext, filename)
-if not text:
+    # Document -> read bytes from disk, extract text, chunk
+    with open(tmp_path, "rb") as f:
+        raw_bytes = f.read()
+    text = _extract_doc_text(raw_bytes, ext, filename)
+    if not text:
+        return []
+
+    meta = {
+        "source":      file_url,
+        "source_type": "sharepoint",
+        "filename":    filename,
+        "site_url":    site_url,
+    }
+    docs = _chunk(text, meta)
+    logger.info("SharePoint file '%s' -> %d chunks", filename, len(docs))
+    return docs
+
+except Exception as exc:
+    logger.error("Error processing %s: %s", filename, exc)
     return []
-
-meta = {
-    "source":      file_url,
-    "source_type": "sharepoint",
-    "filename":    filename,
-    "site_url":    site_url,
-}
-docs = _chunk(text, meta)
-logger.info("SharePoint file '%s' -> %d chunks", filename, len(docs))
-return docs
+finally:
+    # Clean up temp file for documents
+    # (videos are cleaned up inside _transcribe_sharepoint_video)
+    if ext in _DOC_EXTS and os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass

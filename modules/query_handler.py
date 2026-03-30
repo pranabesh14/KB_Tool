@@ -183,80 +183,101 @@ pdf_index_tuple,
 llm,
 embeddings,
 entity_memory,
+confluence_index_tuple=None,
+sharepoint_index_tuple=None,
 top_k: int = TOP_K_RETRIEVAL,
 rerank_k: int = RERANK_K,
 neighbor_window: int = NEIGHBOR_WINDOW,
 ) -> Dict[str, Any]:
 “””
-Retrieves from BOTH video and PDF indexes in one shot and passes all
-docs to answer_from_docs together.  This means a single elaboration-
-detection pass and shared short-term memory update.
+Retrieves from ALL available indexes (video, PDF, Confluence, SharePoint)
+in one shot and generates answers per source type.
 
 ```
 Returns:
     {
-      "video_answer":  str,
-      "video_timestamp": str,
-      "video_source":  str,
-      "kb_answer":     str,
-      "kb_sources":    list[str],
-      "has_video":     bool,
-      "has_kb":        bool,
+      "video_answer":       str,
+      "video_timestamp":    str,
+      "video_source":       str,
+      "kb_answer":          str,
+      "kb_sources":         list[str],
+      "confluence_answer":  str,
+      "confluence_sources": list[str],
+      "sharepoint_answer":  str,
+      "sharepoint_sources": list[str],
+      "has_video":          bool,
+      "has_kb":             bool,
+      "has_confluence":     bool,
+      "has_sharepoint":     bool,
     }
 """
 logger.info("Combined query: %.80s", query)
 
-# ── Check QA memory first for both ────────────────────────────────────────
+# QA memory check
 video_cached = search_qa_memory(query, "video")
 kb_cached    = search_qa_memory(query, "pdf")
-if video_cached:
-    logger.info("Combined: video QA cache hit.")
-if kb_cached:
-    logger.info("Combined: KB QA cache hit.")
 
-# ── Retrieve docs from both indexes ───────────────────────────────────────
-video_index, vid_store = _unpack(video_index_tuple)
-pdf_index,   pdf_store = _unpack(pdf_index_tuple)
+# Retrieve from all indexes
+video_index, vid_store  = _unpack(video_index_tuple)
+pdf_index,   pdf_store  = _unpack(pdf_index_tuple)
+conf_index,  conf_store = _unpack(confluence_index_tuple) if confluence_index_tuple else (None, {})
+sp_index,    sp_store   = _unpack(sharepoint_index_tuple) if sharepoint_index_tuple else (None, {})
 
-vid_expanded = _retrieve_and_expand(query, video_index, vid_store, top_k, rerank_k, neighbor_window, embeddings)
-pdf_expanded = _retrieve_and_expand(query, pdf_index,   pdf_store, top_k, rerank_k, neighbor_window, embeddings)
-logger.info("Combined retrieval: %d video docs, %d KB docs.", len(vid_expanded), len(pdf_expanded))
+vid_expanded  = _retrieve_and_expand(query, video_index, vid_store,  top_k, rerank_k, neighbor_window, embeddings)
+pdf_expanded  = _retrieve_and_expand(query, pdf_index,   pdf_store,  top_k, rerank_k, neighbor_window, embeddings)
+conf_expanded = _retrieve_and_expand(query, conf_index,  conf_store, top_k, rerank_k, neighbor_window, embeddings)
+sp_expanded   = _retrieve_and_expand(query, sp_index,    sp_store,   top_k, rerank_k, neighbor_window, embeddings)
 
-# ── Single LLM call with all retrieved docs ────────────────────────────────
-all_docs = vid_expanded + pdf_expanded
+logger.info(
+    "Retrieval: video=%d, pdf=%d, confluence=%d, sharepoint=%d",
+    len(vid_expanded), len(pdf_expanded), len(conf_expanded), len(sp_expanded)
+)
+
+# Single LLM call with all docs together
+all_docs = vid_expanded + pdf_expanded + conf_expanded + sp_expanded
 if all_docs and not (video_cached and kb_cached):
     logger.info("Calling LLM with %d total docs.", len(all_docs))
     ans_dict = answer_from_docs(query, all_docs, llm, entity_memory, embeddings)
 else:
-    logger.info("Both sources served from QA cache - skipping LLM call.")
-    ans_dict = {"video": _NO_VIDEO_ANS, "kb": _NO_KB_ANS}
+    ans_dict = {"video": _NO_VIDEO_ANS, "kb": _NO_KB_ANS,
+                "confluence": _NO_KB_ANS, "sharepoint": _NO_KB_ANS}
 
-# ── Video result ──────────────────────────────────────────────────────────
-video_answer = video_cached or ans_dict["video"]
+# Video
+video_answer = video_cached or ans_dict.get("video", _NO_VIDEO_ANS)
 has_video    = video_answer != _NO_VIDEO_ANS
 if has_video and not video_cached:
-    logger.info("Saving video answer to QA memory.")
     add_to_qa_index(query, video_answer, "video", embeddings)
-elif not has_video:
-    logger.info("No relevant video answer found.")
 timestamp, vid_source = _timestamp_summary(vid_expanded) if vid_expanded else ("N/A", "N/A")
 
-# ── KB result ─────────────────────────────────────────────────────────────
-kb_answer = kb_cached or ans_dict["kb"]
+# PDF KB
+kb_answer = kb_cached or ans_dict.get("kb", _NO_KB_ANS)
 has_kb    = kb_answer != _NO_KB_ANS
 if has_kb and not kb_cached:
-    logger.info("Saving KB answer to QA memory.")
     add_to_qa_index(query, kb_answer, "pdf", embeddings)
-elif not has_kb:
-    logger.info("No relevant KB answer found.")
-kb_sources = _pdf_source_names(pdf_expanded)
+
+# Confluence
+conf_answer = ans_dict.get("confluence", _NO_KB_ANS)
+has_conf    = conf_answer != _NO_KB_ANS
+conf_sources = _pdf_source_names(conf_expanded)
+
+# SharePoint
+sp_answer = ans_dict.get("sharepoint", _NO_KB_ANS)
+has_sp    = sp_answer != _NO_KB_ANS
+sp_sources = _pdf_source_names(sp_expanded)
 
 return {
-    "video_answer":    video_answer,
-    "video_timestamp": timestamp,
-    "video_source":    vid_source,
-    "kb_answer":       kb_answer,
-    "kb_sources":      kb_sources,
-    "has_video":       has_video,
-    "has_kb":          has_kb,
+    "video_answer":       video_answer,
+    "video_timestamp":    timestamp,
+    "video_source":       vid_source,
+    "kb_answer":          kb_answer,
+    "kb_sources":         _pdf_source_names(pdf_expanded),
+    "confluence_answer":  conf_answer,
+    "confluence_sources": conf_sources,
+    "sharepoint_answer":  sp_answer,
+    "sharepoint_sources": sp_sources,
+    "has_video":          has_video,
+    "has_kb":             has_kb,
+    "has_confluence":     has_conf,
+    "has_sharepoint":     has_sp,
 }
+```

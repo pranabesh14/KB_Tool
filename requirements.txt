@@ -43,9 +43,17 @@ yt-dlp>=2024.1.1                 # platform URL support (Dailymotion, Vimeo, etc
 # ─── Numerics / ML utilities ──────────────────────────────────────────────────
 
 numpy>=1.26.0
+scipy>=1.11.0                    # WAV file reading without ffmpeg (wavfile + resample_poly)
 scikit-learn>=1.4.0
 pandas>=2.1.4
 
 # ─── Azure Cognitive Services (optional – for Azure Speech fallback) ───────────
 
 # azure-cognitiveservices-speech>=1.35.0
+
+# — Confluence + SharePoint integration —————————————–
+
+msal>=1.26.0                     # Azure AD OAuth 2.0 (Microsoft Authentication Library)
+requests>=2.31.0                 # HTTP client for REST API calls
+beautifulsoup4>=4.12.0           # HTML parsing for Confluence page body
+mammoth>=1.6.0                   # Word .doc/.docx text extraction

@@ -188,6 +188,7 @@ import json as _json
 import hashlib
 from modules.config import DATA_DIR
 
+
 # Save to temp file
 ext      = os.path.splitext(filename)[1].lower()
 tmp_path = os.path.normpath(
@@ -239,11 +240,13 @@ finally:
         except Exception:
             pass
 
+
 # — Public API ––––––––––––––––––––––––––––––––
 
 def crawl_sharepoint_url(url: str) -> List[Document]:
 “””
 Crawl a SharePoint URL and return indexable Documents.
+
 
 Supported URL types:
   - Single file  : https://sp.co/sites/Team/Shared Documents/report.pdf
@@ -258,6 +261,7 @@ Returns
 List[Document] with source_type "sharepoint", "sharepoint_video",
 or "sharepoint_attachment".
 """
+
 if not SHAREPOINT_BASE_URL:
     raise RuntimeError(
         "SHAREPOINT_BASE_URL is not set in .env\n"
@@ -277,11 +281,13 @@ else:
     # Folder - crawl recursively (one level deep for safety)
     return _crawl_folder(site_url, rel_path or "/Shared Documents", url)
 
+
 def _crawl_folder(
 site_url: str, folder_rel_path: str, base_url: str
 ) -> List[Document]:
 “”“Crawl all files in a folder and immediate subfolders.”””
 all_docs: List[Document] = []
+
 
 # Files in current folder
 files = _list_folder(site_url, folder_rel_path)
@@ -305,6 +311,7 @@ logger.info(
     len(all_docs), folder_rel_path
 )
 return all_docs
+
 
 def _process_file(
 site_url: str, server_rel_url: str, file_url: str

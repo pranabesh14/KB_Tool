@@ -117,45 +117,103 @@ cache = _cache_path(page_id)
 if os.path.exists(cache):
 try:
 with open(cache, “r”, encoding=“utf-8”) as f:
-return json.load(f)
-except Exception:
-pass
+data = json.load(f)
+logger.info(“Cache hit for page %s”, page_id)
+return data
+except Exception as exc:
+logger.warning(“Cache read failed for %s: %s”, page_id, exc)
 
 ```
-url = (
+api_url = (
     f"{CONFLUENCE_BASE_URL.rstrip('/')}{_REST_API}/{page_id}"
-    "?expand=body.storage,metadata.labels,space"
+    "?expand=body.storage,metadata.labels,space,ancestors"
 )
+logger.info("Fetching Confluence page: %s", api_url)
 try:
-    resp = requests.get(url, headers=get_headers("confluence"),
-                        timeout=_REQUEST_TIMEOUT)
+    headers = get_headers("confluence")
+    resp    = requests.get(api_url, headers=headers, timeout=_REQUEST_TIMEOUT)
+    logger.info("Confluence API response: HTTP %d for page %s", resp.status_code, page_id)
+
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "HTTP 401 Unauthorized - invalid token or missing permissions. "
+            "Check AZURE_AD_CLIENT_SECRET and API permissions in Azure Portal."
+        )
+    if resp.status_code == 403:
+        raise RuntimeError(
+            "HTTP 403 Forbidden - App Registration lacks permission for page "
+            + str(page_id) + ". Check API permissions and admin consent."
+        )
+    if resp.status_code == 404:
+        raise RuntimeError(
+            "HTTP 404 Not Found for page " + str(page_id)
+            + ". API URL: " + api_url
+            + ". Check CONFLUENCE_BASE_URL in .env."
+        )
+
     resp.raise_for_status()
     data = resp.json()
+
     with open(cache, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    logger.info("Fetched page: %s (%s)", page_id, data.get("title", ""))
+
+    logger.info("Fetched page %s: title='%s'", page_id, data.get("title", "?"))
     return data
+
+except RuntimeError:
+    raise
+except requests.exceptions.ConnectionError as exc:
+    raise RuntimeError(
+        "Cannot connect to Confluence at " + CONFLUENCE_BASE_URL
+        + ". Check CONFLUENCE_BASE_URL in .env and network connectivity."
+    ) from exc
 except Exception as exc:
-    logger.error("Error fetching page %s: %s", page_id, exc)
+    logger.error("Error fetching page %s: %s", page_id, exc, exc_info=True)
     return None
 ```
 
 def _fetch_page_from_url(url: str) -> Optional[dict]:
+“”“Resolve a Confluence page URL to page data via REST API.”””
+logger.info(“Resolving Confluence URL: %s”, url)
 page_id = _url_to_page_id(url)
+
+```
+if page_id:
+    logger.info("Extracted page ID from URL: %s", page_id)
+else:
+    # Try /display/SPACE/Title format
+    parsed = urlparse(url)
+    parts  = [p for p in parsed.path.split("/") if p]
+    logger.debug("URL path parts: %s", parts)
+
+    if "display" in parts:
+        idx   = parts.index("display")
+        space = parts[idx + 1] if len(parts) > idx + 1 else None
+        title = parts[idx + 2].replace("+", " ") if len(parts) > idx + 2 else None
+        logger.info("Trying space/title lookup: space=%s title=%s", space, title)
+        if space and title:
+            page_id = _search_by_title(space, title)
+
+    # Try /wiki/spaces/SPACE/pages/ID/Title format
+    if not page_id and "spaces" in parts and "pages" in parts:
+        pages_idx = parts.index("pages")
+        if len(parts) > pages_idx + 1:
+            candidate = parts[pages_idx + 1]
+            if candidate.isdigit():
+                page_id = candidate
+                logger.info("Extracted page ID from /wiki/spaces/ URL: %s", page_id)
+
 if not page_id:
-# Try /display/SPACE/Title resolution
-parsed = urlparse(url)
-parts  = [p for p in parsed.path.split(”/”) if p]
-if “display” in parts:
-idx   = parts.index(“display”)
-space = parts[idx + 1] if len(parts) > idx + 1 else None
-title = parts[idx + 2].replace(”+”, “ “) if len(parts) > idx + 2 else None
-if space and title:
-page_id = _search_by_title(space, title)
-if not page_id:
-logger.warning(“Cannot resolve page ID from URL: %s”, url)
-return None
+    logger.error(
+        "Could not extract page ID from URL: %s "
+        "(supported formats: ?pageId=ID, /display/SPACE/Title, "
+        "/wiki/spaces/SPACE/pages/ID/Title)",
+        url
+    )
+    return None
+
 return _fetch_page(page_id)
+```
 
 def _fetch_attachment_docs(page_id: str, page_url: str) -> List[Document]:
 “”“Download and extract text from PDF/doc attachments on a page.”””
@@ -258,8 +316,17 @@ while queue:
     if depth > max_depth:
         continue
 
-    page_data = _fetch_page_from_url(current_url)
+    try:
+        page_data = _fetch_page_from_url(current_url)
+    except RuntimeError as exc:
+        # Descriptive errors (auth, 404 etc.) - raise so UI shows them
+        raise
+    except Exception as exc:
+        logger.error("Unexpected error fetching %s: %s", current_url, exc, exc_info=True)
+        continue
+
     if not page_data:
+        logger.warning("No data returned for URL: %s", current_url)
         continue
 
     page_id = str(page_data.get("id", ""))
@@ -276,10 +343,14 @@ while queue:
     body_html = (
         page_data.get("body", {}).get("storage", {}).get("value", "")
     )
+    logger.info(
+        "Page '%s': body length=%d chars", title, len(body_html)
+    )
 
     # Page body
     if body_html:
         body_text = _html_to_text(body_html)
+        logger.info("Page '%s': extracted text length=%d chars", title, len(body_text))
         if body_text:
             meta = {
                 "source":      page_url,
